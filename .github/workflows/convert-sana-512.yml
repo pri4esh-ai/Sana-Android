@@ -17,25 +17,25 @@ jobs:
 
     steps:
 
-      # ------------------------------------------------------------
+      # ============================================================
       # CHECKOUT
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
+      # ============================================================
       # PYTHON
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      # ------------------------------------------------------------
-      # PYTORCH / DIFFUSERS / ONNX
-      # ------------------------------------------------------------
+      # ============================================================
+      # INSTALL PYTHON DEPENDENCIES
+      # ============================================================
 
       - name: Install conversion dependencies
         shell: bash
@@ -45,8 +45,8 @@ jobs:
           python -m pip install --upgrade pip
 
           pip install \
-            torch==2.5.1 \
-            torchvision==0.20.1 \
+            torch==2.6.0 \
+            torchvision==0.21.0 \
             diffusers==0.35.2 \
             transformers==4.46.3 \
             accelerate==1.1.1 \
@@ -54,12 +54,34 @@ jobs:
             sentencepiece==0.2.0 \
             onnx==1.17.0 \
             onnxruntime==1.20.1 \
+            onnxscript==0.1.0 \
             huggingface_hub==0.36.0 \
             numpy==1.26.4
 
-      # ------------------------------------------------------------
-      # DOWNLOAD THE REAL SANA MODEL
-      # ------------------------------------------------------------
+          echo ""
+          echo "=========================================="
+          echo "PYTHON VERSIONS"
+          echo "=========================================="
+
+          python - <<'PY'
+          import torch
+          import diffusers
+          import transformers
+          import onnx
+          import onnxruntime
+          import onnxscript
+
+          print("PyTorch:", torch.__version__)
+          print("Diffusers:", diffusers.__version__)
+          print("Transformers:", transformers.__version__)
+          print("ONNX:", onnx.__version__)
+          print("ONNX Runtime:", onnxruntime.__version__)
+          print("ONNX Script:", onnxscript.__version__)
+          PY
+
+      # ============================================================
+      # DOWNLOAD REAL SANA 0.6B 512PX MODEL
+      # ============================================================
 
       - name: Download Sana 0.6B 512px
         shell: bash
@@ -73,25 +95,29 @@ jobs:
 
           repo = "Efficient-Large-Model/Sana_600M_512px_diffusers"
 
+          print("Downloading:")
+          print(repo)
+
           snapshot_download(
               repo_id=repo,
               local_dir="models/sana_diffusers",
               local_dir_use_symlinks=False
           )
 
-          print("Sana model downloaded.")
+          print("")
+          print("Sana model download complete.")
           PY
 
           echo ""
           echo "=========================================="
-          echo "SANA MODEL SIZE"
+          echo "DOWNLOADED MODEL SIZE"
           echo "=========================================="
 
           du -sh models/sana_diffusers
 
           echo ""
           echo "=========================================="
-          echo "SANA MODEL FILES"
+          echo "MODEL FILES"
           echo "=========================================="
 
           find models/sana_diffusers \
@@ -99,16 +125,16 @@ jobs:
             -printf '%p %s bytes\n' \
             | sort
 
-      # ------------------------------------------------------------
-      # VERIFY MODEL
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY MODEL STRUCTURE
+      # ============================================================
 
-      - name: Verify Sana model structure
+      - name: Verify Sana model
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking Sana model..."
+          echo "Checking Sana model structure..."
 
           test -f models/sana_diffusers/model_index.json
           test -d models/sana_diffusers/transformer
@@ -117,38 +143,26 @@ jobs:
           test -d models/sana_diffusers/tokenizer
           test -d models/sana_diffusers/scheduler
 
-          echo "Sana model structure verified."
+          echo ""
+          echo "Sana model structure OK."
 
           echo ""
-          echo "Transformer:"
+          echo "Transformer files:"
           find models/sana_diffusers/transformer \
             -maxdepth 2 \
             -type f \
             -printf '%p %s bytes\n'
 
           echo ""
-          echo "VAE:"
+          echo "VAE files:"
           find models/sana_diffusers/vae \
             -maxdepth 2 \
             -type f \
             -printf '%p %s bytes\n'
 
-      # ------------------------------------------------------------
-      # DOWNLOAD ONNX EXPORTER
-      # ------------------------------------------------------------
-
-      - name: Install ONNX export tools
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          pip install \
-            optimum==1.23.3 \
-            onnxscript==0.1.0
-
-      # ------------------------------------------------------------
+      # ============================================================
       # CREATE EXPORT SCRIPT
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Create Sana ONNX exporter
         shell: bash
@@ -156,153 +170,358 @@ jobs:
           set -euo pipefail
 
           cat > export_sana.py <<'PY'
+
           import os
           import torch
 
           from diffusers import SanaPipeline
 
+
           MODEL = "models/sana_diffusers"
           OUTPUT = "models/sana_onnx"
 
+
           os.makedirs(OUTPUT, exist_ok=True)
 
-          print("Loading Sana 0.6B 512px...")
+
+          print("")
+          print("==========================================")
+          print("LOADING SANA 0.6B 512PX")
+          print("==========================================")
+
 
           pipe = SanaPipeline.from_pretrained(
               MODEL,
               torch_dtype=torch.float16,
-              variant="fp16",
               local_files_only=True,
           )
 
-          print("Pipeline loaded.")
+
+          pipe.transformer.eval()
+          pipe.vae.eval()
+
 
           transformer = pipe.transformer
-          vae = pipe.vae
 
-          # --------------------------------------------------------
-          # Transformer
-          # --------------------------------------------------------
 
-          print("Preparing transformer...")
+          print("")
+          print("==========================================")
+          print("SANA TRANSFORMER CONFIG")
+          print("==========================================")
 
-          transformer.eval()
 
-          dummy_hidden = torch.randn(
-              1,
-              256,
-              transformer.config.caption_channels,
-              dtype=torch.float16
+          print(
+              "in_channels:",
+              transformer.config.in_channels
           )
 
-          dummy_sample = torch.randn(
-              1,
+          print(
+              "out_channels:",
+              transformer.config.out_channels
+          )
+
+          print(
+              "caption_channels:",
+              transformer.config.caption_channels
+          )
+
+          print(
+              "sample_size:",
+              transformer.config.sample_size
+          )
+
+          print(
+              "patch_size:",
+              transformer.config.patch_size
+          )
+
+          print(
+              "num_layers:",
+              transformer.config.num_layers
+          )
+
+
+          # ========================================================
+          # TRANSFORMER
+          # ========================================================
+
+          print("")
+          print("==========================================")
+          print("PREPARING TRANSFORMER")
+          print("==========================================")
+
+
+          batch = 1
+
+          latent_h = 16
+          latent_w = 16
+
+          text_tokens = 256
+
+
+          hidden_states = torch.randn(
+              batch,
               transformer.config.in_channels,
-              16,
-              16,
-              dtype=torch.float16
+              latent_h,
+              latent_w,
+              dtype=torch.float16,
           )
 
-          dummy_timestep = torch.tensor(
-              [1.0],
-              dtype=torch.float32
+
+          encoder_hidden_states = torch.randn(
+              batch,
+              text_tokens,
+              transformer.config.caption_channels,
+              dtype=torch.float16,
           )
+
+
+          # IMPORTANT:
+          # Sana requires timestep to be a 1-D tensor.
+          timestep = torch.tensor(
+              [500.0],
+              dtype=torch.float32,
+          )
+
+
+          print(
+              "hidden_states:",
+              tuple(hidden_states.shape)
+          )
+
+          print(
+              "encoder_hidden_states:",
+              tuple(encoder_hidden_states.shape)
+          )
+
+          print(
+              "timestep:",
+              tuple(timestep.shape)
+          )
+
+
+          class SanaTransformerWrapper(torch.nn.Module):
+
+              def __init__(self, model):
+                  super().__init__()
+                  self.model = model
+
+
+              def forward(
+                  self,
+                  hidden_states,
+                  encoder_hidden_states,
+                  timestep,
+              ):
+
+                  output = self.model(
+                      hidden_states=hidden_states,
+                      encoder_hidden_states=encoder_hidden_states,
+                      timestep=timestep,
+                      return_dict=False,
+                  )
+
+                  return output[0]
+
+
+          wrapper = SanaTransformerWrapper(
+              transformer
+          ).eval()
+
 
           transformer_output = os.path.join(
               OUTPUT,
               "transformer.onnx"
           )
 
-          print("Exporting transformer...")
 
-          torch.onnx.export(
-              transformer,
-              (
-                  dummy_sample,
-                  dummy_timestep,
-                  dummy_hidden,
-              ),
-              transformer_output,
-              input_names=[
-                  "sample",
-                  "timestep",
-                  "encoder_hidden_states",
-              ],
-              output_names=[
-                  "output",
-              ],
-              opset_version=17,
-              do_constant_folding=True,
-              external_data=True,
+          print("")
+          print("==========================================")
+          print("EXPORTING SANA TRANSFORMER")
+          print("==========================================")
+
+
+          with torch.no_grad():
+
+              torch.onnx.export(
+                  wrapper,
+                  (
+                      hidden_states,
+                      encoder_hidden_states,
+                      timestep,
+                  ),
+                  transformer_output,
+
+                  input_names=[
+                      "hidden_states",
+                      "encoder_hidden_states",
+                      "timestep",
+                  ],
+
+                  output_names=[
+                      "sample",
+                  ],
+
+                  opset_version=17,
+
+                  dynamo=True,
+
+                  external_data=True,
+
+                  optimize=True,
+              )
+
+
+          print("")
+          print("Transformer export complete.")
+
+          print(
+              "Transformer ONNX:",
+              transformer_output
           )
 
-          print("Transformer exported.")
 
-          # --------------------------------------------------------
+          # ========================================================
           # VAE DECODER
-          # --------------------------------------------------------
+          # ========================================================
 
-          print("Preparing VAE decoder...")
+          print("")
+          print("==========================================")
+          print("PREPARING VAE DECODER")
+          print("==========================================")
+
+
+          vae = pipe.vae
 
           vae.eval()
 
+
+          class VAEDecoder(torch.nn.Module):
+
+              def __init__(self, model):
+                  super().__init__()
+                  self.model = model
+
+
+              def forward(self, latents):
+
+                  output = self.model.decode(
+                      latents,
+                      return_dict=False,
+                  )
+
+                  return output[0]
+
+
+          decoder = VAEDecoder(
+              vae
+          ).eval()
+
+
+          latent_channels = 32
+
+
           latent = torch.randn(
               1,
-              32,
+              latent_channels,
               16,
               16,
-              dtype=torch.float32
+              dtype=torch.float32,
           )
+
 
           decoder_output = os.path.join(
               OUTPUT,
               "vae_decoder.onnx"
           )
 
-          class VAEDecoder(torch.nn.Module):
-              def __init__(self, model):
-                  super().__init__()
-                  self.model = model
 
-              def forward(self, latents):
-                  return self.model.decode(latents).sample
-
-          decoder = VAEDecoder(vae)
-
-          print("Exporting VAE decoder...")
-
-          torch.onnx.export(
-              decoder,
-              (latent,),
-              decoder_output,
-              input_names=["latent"],
-              output_names=["image"],
-              opset_version=17,
-              do_constant_folding=True,
-              external_data=True,
+          print(
+              "latent:",
+              tuple(latent.shape)
           )
 
-          print("VAE decoder exported.")
 
+          print("")
           print("==========================================")
-          print("EXPORT COMPLETE")
+          print("EXPORTING VAE DECODER")
           print("==========================================")
+
+
+          with torch.no_grad():
+
+              torch.onnx.export(
+                  decoder,
+                  (latent,),
+                  decoder_output,
+
+                  input_names=[
+                      "latent",
+                  ],
+
+                  output_names=[
+                      "image",
+                  ],
+
+                  opset_version=17,
+
+                  dynamo=True,
+
+                  external_data=True,
+
+                  optimize=True,
+              )
+
+
+          print("")
+          print("VAE decoder export complete.")
+
+          print(
+              "VAE ONNX:",
+              decoder_output
+          )
+
+
+          # ========================================================
+          # FINAL EXPORT REPORT
+          # ========================================================
+
+          print("")
+          print("==========================================")
+          print("ONNX EXPORT COMPLETE")
+          print("==========================================")
+
 
           for root, _, files in os.walk(OUTPUT):
-              for name in files:
-                  print(os.path.join(root, name))
+
+              for name in sorted(files):
+
+                  path = os.path.join(
+                      root,
+                      name
+                  )
+
+                  print(
+                      path,
+                      os.path.getsize(path),
+                      "bytes"
+                  )
+
           PY
 
-      # ------------------------------------------------------------
+      # ============================================================
       # EXPORT REAL ONNX MODELS
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Export Sana Transformer and VAE
         shell: bash
-        env:
-          PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
         run: |
           set -euo pipefail
+
+          echo ""
+          echo "=========================================="
+          echo "STARTING ONNX EXPORT"
+          echo "=========================================="
 
           python export_sana.py
 
@@ -317,11 +536,91 @@ jobs:
             | sort
 
           echo ""
+          echo "TOTAL ONNX SIZE:"
           du -sh models/sana_onnx
 
-      # ------------------------------------------------------------
-      # INSTALL MNN
-      # ------------------------------------------------------------
+          echo ""
+          echo "Checking required files..."
+
+          test -f models/sana_onnx/transformer.onnx
+          test -f models/sana_onnx/vae_decoder.onnx
+
+          echo "Required ONNX files found."
+
+      # ============================================================
+      # VALIDATE ONNX
+      # ============================================================
+
+      - name: Validate ONNX models
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+
+          import os
+          import onnx
+
+
+          root = "models/sana_onnx"
+
+
+          files = []
+
+
+          for base, _, names in os.walk(root):
+
+              for name in names:
+
+                  if name.endswith(".onnx"):
+
+                      files.append(
+                          os.path.join(
+                              base,
+                              name
+                          )
+                      )
+
+
+          if not files:
+              raise RuntimeError(
+                  "No ONNX files found."
+              )
+
+
+          print(
+              "Found",
+              len(files),
+              "ONNX files."
+          )
+
+
+          for path in sorted(files):
+
+              print("")
+              print("Checking:")
+              print(path)
+
+              model = onnx.load(
+                  path,
+                  load_external_data=False
+              )
+
+              onnx.checker.check_model(
+                  model
+              )
+
+              print("VALID")
+
+
+          print("")
+          print("All ONNX graphs passed validation.")
+
+          PY
+
+      # ============================================================
+      # CHECKOUT MNN
+      # ============================================================
 
       - name: Checkout MNN
         shell: bash
@@ -333,9 +632,13 @@ jobs:
             https://github.com/alibaba/MNN.git \
             third_party/MNN
 
-      # ------------------------------------------------------------
+          echo ""
+          echo "MNN commit:"
+          git -C third_party/MNN rev-parse HEAD
+
+      # ============================================================
       # BUILD MNN CONVERTER
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Build MNNConvert
         shell: bash
@@ -344,7 +647,9 @@ jobs:
 
           cd third_party/MNN
 
-          mkdir -p build_converter
+          rm -rf build_converter
+
+          mkdir build_converter
 
           cd build_converter
 
@@ -364,22 +669,25 @@ jobs:
 
           test -x MNNConvert
 
-          echo "MNNConvert built successfully."
+          echo ""
+          echo "MNNConvert successfully built."
 
-      # ------------------------------------------------------------
-      # PREPARE MNN OUTPUT
-      # ------------------------------------------------------------
+      # ============================================================
+      # PREPARE OUTPUT
+      # ============================================================
 
-      - name: Prepare MNN model directory
+      - name: Prepare MNN output
         shell: bash
         run: |
           set -euo pipefail
 
+          rm -rf models/sana_mnn
+
           mkdir -p models/sana_mnn
 
-      # ------------------------------------------------------------
+      # ============================================================
       # CONVERT TRANSFORMER
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Convert Sana Transformer to MNN
         shell: bash
@@ -388,69 +696,111 @@ jobs:
 
           MNN="third_party/MNN/build_converter/MNNConvert"
 
-          test -f models/sana_onnx/transformer.onnx
+          ONNX="models/sana_onnx/transformer.onnx"
+
+          OUTPUT="models/sana_mnn/transformer.mnn"
+
+
+          test -f "$ONNX"
+
+
+          echo ""
+          echo "=========================================="
+          echo "CONVERTING TRANSFORMER"
+          echo "=========================================="
+
 
           "$MNN" \
             -f ONNX \
-            --modelFile models/sana_onnx/transformer.onnx \
-            --MNNModel models/sana_mnn/transformer.mnn \
+            --modelFile "$ONNX" \
+            --MNNModel "$OUTPUT" \
             --fp16 \
             --optimizePrefer=2
 
-          test -f models/sana_mnn/transformer.mnn
 
+          test -f "$OUTPUT"
+
+
+          echo ""
           echo "Transformer MNN created:"
-          ls -lh models/sana_mnn/transformer.mnn
 
-      # ------------------------------------------------------------
-      # CONVERT VAE DECODER
-      # ------------------------------------------------------------
+          ls -lh "$OUTPUT"
 
-      - name: Convert VAE Decoder to MNN
+      # ============================================================
+      # CONVERT VAE
+      # ============================================================
+
+      - name: Convert Sana VAE Decoder to MNN
         shell: bash
         run: |
           set -euo pipefail
 
           MNN="third_party/MNN/build_converter/MNNConvert"
 
-          test -f models/sana_onnx/vae_decoder.onnx
+          ONNX="models/sana_onnx/vae_decoder.onnx"
+
+          OUTPUT="models/sana_mnn/vae_decoder.mnn"
+
+
+          test -f "$ONNX"
+
+
+          echo ""
+          echo "=========================================="
+          echo "CONVERTING VAE DECODER"
+          echo "=========================================="
+
 
           "$MNN" \
             -f ONNX \
-            --modelFile models/sana_onnx/vae_decoder.onnx \
-            --MNNModel models/sana_mnn/vae_decoder.mnn \
+            --modelFile "$ONNX" \
+            --MNNModel "$OUTPUT" \
             --fp16 \
             --optimizePrefer=2
 
-          test -f models/sana_mnn/vae_decoder.mnn
 
+          test -f "$OUTPUT"
+
+
+          echo ""
           echo "VAE decoder MNN created:"
-          ls -lh models/sana_mnn/vae_decoder.mnn
 
-      # ------------------------------------------------------------
-      # COPY RUNTIME CONFIGURATION
-      # ------------------------------------------------------------
+          ls -lh "$OUTPUT"
+
+      # ============================================================
+      # COPY CONFIGURATION
+      # ============================================================
 
       - name: Copy Sana runtime configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          cp models/sana_diffusers/model_index.json \
-             models/sana_mnn/
+          cp \
+            models/sana_diffusers/model_index.json \
+            models/sana_mnn/model_index.json
 
-          cp models/sana_diffusers/scheduler/scheduler_config.json \
-             models/sana_mnn/
 
-          cp models/sana_diffusers/transformer/config.json \
-             models/sana_mnn/transformer_config.json
+          cp \
+            models/sana_diffusers/scheduler/scheduler_config.json \
+            models/sana_mnn/scheduler_config.json
 
-          cp models/sana_diffusers/vae/config.json \
-             models/sana_mnn/vae_config.json
 
-      # ------------------------------------------------------------
+          cp \
+            models/sana_diffusers/transformer/config.json \
+            models/sana_mnn/transformer_config.json
+
+
+          cp \
+            models/sana_diffusers/vae/config.json \
+            models/sana_mnn/vae_config.json
+
+
+          echo "Runtime configuration copied."
+
+      # ============================================================
       # CREATE MANIFEST
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Create model manifest
         shell: bash
@@ -458,110 +808,170 @@ jobs:
           set -euo pipefail
 
           python - <<'PY'
+
           import hashlib
           import json
           import os
 
+
           root = "models/sana_mnn"
+
 
           files = []
 
+
           for base, _, names in os.walk(root):
+
               for name in names:
 
-                  path = os.path.join(base, name)
+                  path = os.path.join(
+                      base,
+                      name
+                  )
 
-                  h = hashlib.sha256()
 
-                  with open(path, "rb") as f:
+                  sha = hashlib.sha256()
+
+
+                  with open(
+                      path,
+                      "rb"
+                  ) as f:
+
                       while True:
-                          data = f.read(1024 * 1024)
 
-                          if not data:
+                          chunk = f.read(
+                              1024 * 1024
+                          )
+
+                          if not chunk:
                               break
 
-                          h.update(data)
+                          sha.update(chunk)
+
 
                   files.append({
-                      "path": os.path.relpath(path, root),
-                      "bytes": os.path.getsize(path),
-                      "sha256": h.hexdigest()
+                      "path": os.path.relpath(
+                          path,
+                          root
+                      ),
+                      "bytes": os.path.getsize(
+                          path
+                      ),
+                      "sha256": sha.hexdigest()
                   })
+
 
           manifest = {
               "model": "Sana-0.6B",
               "resolution": "512x512",
               "parameters": "590M",
-              "source": "Efficient-Large-Model/Sana_600M_512px_diffusers",
-              "transformer_precision": "fp16",
+              "source":
+                  "Efficient-Large-Model/"
+                  "Sana_600M_512px_diffusers",
               "runtime": "MNN",
+              "transformer_precision": "fp16",
               "files": sorted(
                   files,
                   key=lambda x: x["path"]
               )
           }
 
+
+          output = os.path.join(
+              root,
+              "manifest.json"
+          )
+
+
           with open(
-              os.path.join(
-                  root,
-                  "manifest.json"
-              ),
+              output,
               "w"
           ) as f:
+
               json.dump(
                   manifest,
                   f,
                   indent=2
               )
 
+
+          print("")
           print(
               json.dumps(
                   manifest,
                   indent=2
               )
           )
+
           PY
 
-      # ------------------------------------------------------------
+      # ============================================================
       # FINAL VALIDATION
-      # ------------------------------------------------------------
+      # ============================================================
 
-      - name: Validate real MNN model
+      - name: Validate final MNN model
         shell: bash
         run: |
           set -euo pipefail
 
+          echo ""
           echo "=========================================="
           echo "FINAL SANA MNN MODEL"
           echo "=========================================="
 
-          test -f models/sana_mnn/transformer.mnn
-          test -f models/sana_mnn/vae_decoder.mnn
+
+          test -f \
+            models/sana_mnn/transformer.mnn
+
+
+          test -f \
+            models/sana_mnn/vae_decoder.mnn
+
 
           echo ""
-          echo "Files:"
+          echo "MNN files:"
+
           find models/sana_mnn \
             -type f \
             -printf '%p %s bytes\n' \
             | sort
 
-          echo ""
-          echo "TOTAL SIZE:"
-          du -sh models/sana_mnn
 
           echo ""
-          echo "TRANSFORMER:"
-          ls -lh models/sana_mnn/transformer.mnn
+          echo "=========================================="
+          echo "TRANSFORMER SIZE"
+          echo "=========================================="
+
+
+          ls -lh \
+            models/sana_mnn/transformer.mnn
+
 
           echo ""
-          echo "VAE:"
-          ls -lh models/sana_mnn/vae_decoder.mnn
+          echo "=========================================="
+          echo "VAE SIZE"
+          echo "=========================================="
 
-      # ------------------------------------------------------------
-      # UPLOAD REAL MODEL
-      # ------------------------------------------------------------
 
-      - name: Upload REAL Sana MNN model
+          ls -lh \
+            models/sana_mnn/vae_decoder.mnn
+
+
+          echo ""
+          echo "=========================================="
+          echo "TOTAL MODEL SIZE"
+          echo "=========================================="
+
+
+          du -sh \
+            models/sana_mnn
+
+      # ============================================================
+      # UPLOAD ACTUAL MODEL
+      # ============================================================
+
+      - name: Upload Sana MNN model
         uses: actions/upload-artifact@v4
         with:
           name: Sana-0.6B-512-MNN-REAL
