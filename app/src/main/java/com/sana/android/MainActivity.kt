@@ -3,7 +3,8 @@ package com.sana.android
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
-import android.widget.Toast
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -26,8 +27,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.sana.android.engine.NativeSana
 import java.io.File
@@ -35,511 +43,435 @@ import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
 
-    override fun onCreate(
-        savedInstanceState: Bundle?
-    ) {
-
-        super.onCreate(
-            savedInstanceState
-        )
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
         setContent {
-            SanaTestApp(
-                context = this
-            )
+            MaterialTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    SanaTestScreen(
+                        context = this@MainActivity
+                    )
+                }
+            }
         }
+    }
+
+    override fun onDestroy() {
+        NativeSana.release()
+        super.onDestroy()
     }
 }
 
-
 @Composable
-private fun SanaTestApp(
+private fun SanaTestScreen(
     context: Context
 ) {
-
-    var transformerFile by remember {
-        mutableStateOf<File?>(null)
+    var transformerUri by remember {
+        mutableStateOf<Uri?>(null)
     }
 
-    var vaeFile by remember {
-        mutableStateOf<File?>(null)
+    var vaeUri by remember {
+        mutableStateOf<Uri?>(null)
+    }
+
+    var transformerName by remember {
+        mutableStateOf("No Transformer selected")
+    }
+
+    var vaeName by remember {
+        mutableStateOf("No VAE selected")
+    }
+
+    var status by remember {
+        mutableStateOf("Ready")
+    }
+
+    var result by remember {
+        mutableStateOf("")
     }
 
     var testing by remember {
         mutableStateOf(false)
     }
 
-    var result by remember {
-        mutableStateOf(
-            "No test performed yet."
-        )
+    var copying by remember {
+        mutableStateOf(false)
     }
 
-    var transformerName by remember {
-        mutableStateOf(
-            "Transformer not selected"
-        )
+    val executor = remember {
+        Executors.newSingleThreadExecutor()
     }
 
-    var vaeName by remember {
-        mutableStateOf(
-            "VAE decoder not selected"
-        )
+    val mainHandler = remember {
+        Handler(Looper.getMainLooper())
     }
-
-    val executor =
-        remember {
-            Executors.newSingleThreadExecutor()
-        }
 
     DisposableEffect(Unit) {
-
         onDispose {
-            executor.shutdown()
+            executor.shutdownNow()
         }
     }
 
     val transformerPicker =
         rememberLauncherForActivityResult(
-            contract =
-                ActivityResultContracts.OpenDocument()
-        ) { uri: Uri? ->
-
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri ->
             if (uri != null) {
+                transformerUri = uri
 
-                result =
-                    "Copying Transformer..."
+                transformerName =
+                    uri.lastPathSegment
+                        ?.substringAfterLast("/")
+                        ?: "Transformer selected"
 
-                executor.execute {
-
-                    try {
-
-                        val file =
-                            copyModel(
-                                context,
-                                uri,
-                                "sana_transformer.mnn"
-                            )
-
-                        transformerFile =
-                            file
-
-                        transformerName =
-                            file.name
-
-                        result =
-                            "Transformer ready:\n" +
-                            file.length() /
-                            (1024L * 1024L) +
-                            " MB"
-
-                    } catch (e: Exception) {
-
-                        result =
-                            "Transformer copy failed:\n" +
-                            e.message
-                    }
-                }
+                status = "Transformer selected"
             }
         }
-
 
     val vaePicker =
         rememberLauncherForActivityResult(
-            contract =
-                ActivityResultContracts.OpenDocument()
-        ) { uri: Uri? ->
-
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri ->
             if (uri != null) {
+                vaeUri = uri
 
-                result =
-                    "Copying VAE..."
+                vaeName =
+                    uri.lastPathSegment
+                        ?.substringAfterLast("/")
+                        ?: "VAE selected"
 
-                executor.execute {
-
-                    try {
-
-                        val file =
-                            copyModel(
-                                context,
-                                uri,
-                                "sana_vae_decoder.mnn"
-                            )
-
-                        vaeFile =
-                            file
-
-                        vaeName =
-                            file.name
-
-                        result =
-                            "VAE ready:\n" +
-                            file.length() /
-                            (1024L * 1024L) +
-                            " MB"
-
-                    } catch (e: Exception) {
-
-                        result =
-                            "VAE copy failed:\n" +
-                            e.message
-                    }
-                }
+                status = "VAE selected"
             }
         }
 
-
-    Surface(
+    Column(
         modifier =
-            Modifier.fillMaxSize()
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
 
-        Column(
-            modifier =
-                Modifier
-                    .fillMaxSize()
-                    .verticalScroll(
-                        rememberScrollState()
-                    )
-                    .padding(20.dp),
-            verticalArrangement =
-                Arrangement.Top
+        Text(
+            text = "Sana Android",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+
+        Text(
+            text = "Sana 0.6B • 512×512 • MNN • ARM64",
+            style = MaterialTheme.typography.bodyMedium
+        )
+
+        Spacer(
+            modifier = Modifier.height(8.dp)
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth()
         ) {
-
-            Text(
-                text = "Sana 0.6B Test",
-                style =
-                    MaterialTheme.typography
-                        .headlineMedium
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.height(6.dp)
-            )
-
-            Text(
-                text =
-                    "512 × 512 • MNN • OpenCL / FP16"
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.height(20.dp)
-            )
-
-            Card(
-                modifier =
-                    Modifier.fillMaxWidth()
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
 
-                Column(
-                    modifier =
-                        Modifier.padding(16.dp)
-                ) {
+                Text(
+                    text = "1. Transformer model",
+                    fontWeight = FontWeight.Bold
+                )
 
-                    Text(
-                        text =
-                            "1. Transformer"
-                    )
-
-                    Spacer(
-                        modifier =
-                            Modifier.height(6.dp)
-                    )
-
-                    Text(
-                        text =
-                            transformerName
-                    )
-
-                    Spacer(
-                        modifier =
-                            Modifier.height(10.dp)
-                    )
-
-                    Button(
-                        onClick = {
-                            transformerPicker.launch(
-                                arrayOf(
-                                    "application/octet-stream",
-                                    "application/*",
-                                    "*/*"
-                                )
-                            )
-                        },
-                        enabled = !testing,
-                        modifier =
-                            Modifier.fillMaxWidth()
-                    ) {
-
-                        Text(
-                            "Select Transformer"
-                        )
-                    }
-                }
-            }
-
-            Spacer(
-                modifier =
-                    Modifier.height(14.dp)
-            )
-
-            Card(
-                modifier =
-                    Modifier.fillMaxWidth()
-            ) {
-
-                Column(
-                    modifier =
-                        Modifier.padding(16.dp)
-                ) {
-
-                    Text(
-                        text =
-                            "2. VAE Decoder"
-                    )
-
-                    Spacer(
-                        modifier =
-                            Modifier.height(6.dp)
-                    )
-
-                    Text(
-                        text =
-                            vaeName
-                    )
-
-                    Spacer(
-                        modifier =
-                            Modifier.height(10.dp)
-                    )
-
-                    Button(
-                        onClick = {
-                            vaePicker.launch(
-                                arrayOf(
-                                    "application/octet-stream",
-                                    "application/*",
-                                    "*/*"
-                                )
-                            )
-                        },
-                        enabled = !testing,
-                        modifier =
-                            Modifier.fillMaxWidth()
-                    ) {
-
-                        Text(
-                            "Select VAE"
-                        )
-                    }
-                }
-            }
-
-            Spacer(
-                modifier =
-                    Modifier.height(18.dp)
-            )
-
-            Row(
-                modifier =
-                    Modifier.fillMaxWidth()
-            ) {
-
-                Button(
-                    onClick = {
-
-                        val transformer =
-                            transformerFile
-
-                        val vae =
-                            vaeFile
-
-                        if (
-                            transformer == null ||
-                            vae == null
-                        ) {
-
-                            Toast.makeText(
-                                context,
-                                "Select both models first.",
-                                Toast.LENGTH_SHORT
-                            ).show()
-
-                            return@Button
-                        }
-
-                        testing =
-                            true
-
-                        result =
-                            "Starting native MNN test...\n\n" +
-                            "Transformer will run first.\n" +
-                            "VAE will run after Transformer is released."
-
-                        executor.execute {
-
-                            val output =
-                                try {
-
-                                    NativeSana.testModels(
-                                        context,
-                                        transformer,
-                                        vae,
-                                        true
-                                    )
-
-                                } catch (
-                                    e: Throwable
-                                ) {
-
-                                    "NATIVE TEST CRASH/ERROR:\n" +
-                                    e.stackTraceToString()
-                                }
-
-                            runOnUiThread {
-
-                                result =
-                                    output
-
-                                testing =
-                                    false
-                            }
-                        }
-
-                    },
-                    enabled =
-                        !testing &&
-                        transformerFile != null &&
-                        vaeFile != null,
-                    modifier =
-                        Modifier.weight(1f)
-                ) {
-
-                    if (testing) {
-
-                        CircularProgressIndicator(
-                            modifier =
-                                Modifier
-                                    .width(22.dp)
-                                    .height(22.dp)
-                    } else {
-
-                        Text(
-                            "TEST SANA"
-                        )
-                    }
-                }
-
-                Spacer(
-                    modifier =
-                        Modifier.width(8.dp)
+                Text(
+                    text = transformerName,
+                    style = MaterialTheme.typography.bodySmall
                 )
 
                 OutlinedButton(
                     onClick = {
-
-                        result =
-                            "Ready."
-
+                        transformerPicker.launch(
+                            arrayOf(
+                                "application/octet-stream",
+                                "application/*",
+                                "*/*"
+                            )
+                        )
                     },
-                    enabled = !testing
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-
-                    Text(
-                        "Clear"
-                    )
+                    Text("Select sana_transformer.mnn")
                 }
             }
+        }
 
-            Spacer(
-                modifier =
-                    Modifier.height(18.dp)
-            )
-
-            Text(
-                text = "Test result",
-                style =
-                    MaterialTheme.typography
-                        .titleMedium
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.height(8.dp)
-            )
-
-            Card(
-                modifier =
-                    Modifier.fillMaxWidth()
+        Card(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
 
                 Text(
-                    text =
-                        result,
+                    text = "2. VAE decoder",
+                    fontWeight = FontWeight.Bold
+                )
+
+                Text(
+                    text = vaeName,
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                OutlinedButton(
+                    onClick = {
+                        vaePicker.launch(
+                            arrayOf(
+                                "application/octet-stream",
+                                "application/*",
+                                "*/*"
+                            )
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Select sana_vae_decoder.mnn")
+                }
+            }
+        }
+
+        Spacer(
+            modifier = Modifier.height(4.dp)
+        )
+
+        Button(
+            enabled =
+                transformerUri != null &&
+                    vaeUri != null &&
+                    !testing &&
+                    !copying,
+            onClick = {
+
+                val transformer = transformerUri
+                val vae = vaeUri
+
+                if (transformer == null || vae == null) {
+                    status = "Select both models first"
+                    return@Button
+                }
+
+                testing = true
+                copying = true
+                result = ""
+                status = "Copying models..."
+
+                executor.execute {
+
+                    try {
+
+                        val modelDir =
+                            File(
+                                context.filesDir,
+                                "sana_models"
+                            )
+
+                        if (!modelDir.exists()) {
+                            modelDir.mkdirs()
+                        }
+
+                        val transformerFile =
+                            File(
+                                modelDir,
+                                "sana_transformer.mnn"
+                            )
+
+                        val vaeFile =
+                            File(
+                                modelDir,
+                                "sana_vae_decoder.mnn"
+                            )
+
+                        copyUriToFile(
+                            context = context,
+                            uri = transformer,
+                            destination = transformerFile
+                        )
+
+                        mainHandler.post {
+                            status = "Transformer copied"
+                        }
+
+                        copyUriToFile(
+                            context = context,
+                            uri = vae,
+                            destination = vaeFile
+                        )
+
+                        mainHandler.post {
+                            copying = false
+                            status = "Models copied. Testing MNN..."
+                        }
+
+                        /*
+                         * Native test call.
+                         *
+                         * This expects NativeSana to expose:
+                         *
+                         * nativeTestModels(
+                         *     transformerPath,
+                         *     vaePath,
+                         *     preferOpenCl
+                         * )
+                         *
+                         * through testModels().
+                         */
+                        val output =
+                            NativeSana.testModels(
+                                transformerFile.absolutePath,
+                                vaeFile.absolutePath,
+                                true
+                            )
+
+                        mainHandler.post {
+                            result = output
+                            status = "Test finished"
+                            testing = false
+                        }
+
+                    } catch (t: Throwable) {
+
+                        val message =
+                            buildString {
+                                append(
+                                    t::class.java.simpleName
+                                )
+                                append(": ")
+                                append(
+                                    t.message
+                                        ?: "Unknown error"
+                                )
+                            }
+
+                        mainHandler.post {
+                            copying = false
+                            testing = false
+                            status = "Test failed"
+                            result = message
+                        }
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+
+            if (testing) {
+
+                CircularProgressIndicator(
                     modifier =
                         Modifier
-                            .padding(16.dp)
+                            .width(22.dp)
+                            .height(22.dp)
                 )
+
+                Spacer(
+                    modifier = Modifier.width(10.dp)
+                )
+
+                Text("Testing...")
+
+            } else {
+
+                Text("Test Sana Models")
             }
-
-            Spacer(
-                modifier =
-                    Modifier.height(20.dp)
-            )
-
-            Text(
-                text =
-                    "The first test uses zero-filled tensors. " +
-                    "It verifies that the converted MNN graphs " +
-                    "can load and execute. It is not yet " +
-                    "text-to-image generation."
-            )
         }
+
+        Card(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+
+                Text(
+                    text = "Status",
+                    fontWeight = FontWeight.Bold
+                )
+
+                Text(
+                    text = status
+                )
+
+                if (result.isNotBlank()) {
+
+                    Spacer(
+                        modifier = Modifier.height(4.dp)
+                    )
+
+                    Text(
+                        text = "Result",
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        text = result
+                    )
+                }
+            }
+        }
+
+        Spacer(
+            modifier = Modifier.height(12.dp)
+        )
+
+        Text(
+            text =
+                "This test loads the 1.5 GB Sana package from internal storage. " +
+                    "The APK does not contain the models.",
+            style = MaterialTheme.typography.bodySmall
+        )
     }
 }
 
-
-private fun copyModel(
+private fun copyUriToFile(
     context: Context,
     uri: Uri,
-    fileName: String
-): File {
-
-    val modelDirectory =
-        File(
-            context.filesDir,
-            "sana_models"
-        )
-
-    if (!modelDirectory.exists()) {
-        modelDirectory.mkdirs()
-    }
-
-    val destination =
-        File(
-            modelDirectory,
-            fileName
-        )
+    destination: File
+) {
 
     context.contentResolver
         .openInputStream(uri)
-        .use { input ->
+        ?.use { input ->
 
-            requireNotNull(input) {
-                "Unable to open selected file."
-            }
+            destination.outputStream().use { output ->
 
-            destination.outputStream()
-                .use { output ->
+                val buffer =
+                    ByteArray(
+                        1024 * 1024
+                    )
 
-                    input.copyTo(
-                        output,
-                        bufferSize = 1024 * 1024
+                while (true) {
+
+                    val read =
+                        input.read(buffer)
+
+                    if (read <= 0) {
+                        break
+                    }
+
+                    output.write(
+                        buffer,
+                        0,
+                        read
                     )
                 }
-        }
 
-    return destination
+                output.flush()
+            }
+        }
+        ?: throw IllegalStateException(
+            "Unable to open selected model"
+        )
 }
