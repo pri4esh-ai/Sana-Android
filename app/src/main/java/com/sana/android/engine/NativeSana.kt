@@ -1,7 +1,7 @@
 package com.sana.android.engine
 
 import android.content.Context
-import android.content.res.AssetManager
+import java.io.File
 
 object NativeSana {
 
@@ -10,7 +10,7 @@ object NativeSana {
     }
 
     external fun nativeInitialize(
-        assetManager: AssetManager,
+        assetManager: android.content.res.AssetManager,
         modelAsset: String,
         cachePath: String,
         preferOpenCl: Boolean,
@@ -18,12 +18,16 @@ object NativeSana {
     ): Boolean
 
     external fun nativeIsInitialized(): Boolean
-
     external fun nativeGetBackend(): String
-
     external fun nativeGetStatus(): String
-
     external fun nativeRelease()
+
+    external fun nativeTestModels(
+        transformerPath: String,
+        vaePath: String,
+        cachePath: String,
+        preferOpenCl: Boolean
+    ): String
 
     fun initialize(
         context: Context,
@@ -31,7 +35,6 @@ object NativeSana {
         preferOpenCl: Boolean = true,
         cpuThreads: Int = 4
     ): Boolean {
-
         return nativeInitialize(
             context.assets,
             modelAsset,
@@ -41,19 +44,30 @@ object NativeSana {
         )
     }
 
-    fun isInitialized(): Boolean {
-        return nativeIsInitialized()
-    }
+    fun isInitialized(): Boolean =
+        nativeIsInitialized()
 
-    fun backend(): String {
-        return nativeGetBackend()
-    }
+    fun backend(): String =
+        nativeGetBackend()
 
-    fun status(): String {
-        return nativeGetStatus()
-    }
+    fun status(): String =
+        nativeGetStatus()
 
     fun release() {
         nativeRelease()
+    }
+
+    fun testModels(
+        context: Context,
+        transformerFile: File,
+        vaeFile: File,
+        preferOpenCl: Boolean = true
+    ): String {
+        return nativeTestModels(
+            transformerFile.absolutePath,
+            vaeFile.absolutePath,
+            context.cacheDir.absolutePath,
+            preferOpenCl
+        )
     }
 }
