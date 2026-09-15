@@ -1,0 +1,611 @@
+name: Build Sana Android Model
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sana-model-build
+  cancel-in-progress: false
+
+jobs:
+
+  build-model:
+    name: Download Sana-Sprint 0.6B + Build APK
+    runs-on: ubuntu-22.04
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. Java 17
+      # ============================================================
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+
+      # ============================================================
+      # 3. Android SDK
+      # ============================================================
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          SDK_ROOT="$HOME/android-sdk"
+
+          mkdir -p "$SDK_ROOT"
+
+          cd "$HOME"
+
+          wget -q \
+            https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip \
+            -O commandlinetools.zip
+
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+
+          unzip -q \
+            commandlinetools.zip \
+            -d "$SDK_ROOT/cmdline-tools"
+
+          mv \
+            "$SDK_ROOT/cmdline-tools/cmdline-tools" \
+            "$SDK_ROOT/cmdline-tools/latest"
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+
+      # ============================================================
+      # 4. Android packages
+      # ============================================================
+
+      - name: Install Android packages
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses > /dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.31.6" \
+            "ndk;27.0.12077973"
+
+
+      # ============================================================
+      # 5. Verify toolchain
+      # ============================================================
+
+      - name: Verify native toolchain
+        shell: bash
+        run: |
+          set -e
+
+          NDK="$ANDROID_HOME/ndk/27.0.12077973"
+          CMAKE="$ANDROID_HOME/cmake/3.31.6/bin/cmake"
+
+          echo "======================================"
+          echo "NDK"
+          echo "======================================"
+
+          "$NDK/ndk-build" --version
+
+          test -f \
+            "$NDK/build/cmake/android.toolchain.cmake"
+
+          echo "Android NDK verified."
+
+          echo ""
+          echo "======================================"
+          echo "CMAKE"
+          echo "======================================"
+
+          "$CMAKE" --version
+
+
+      # ============================================================
+      # 6. Download Sana-Sprint MNN model
+      #
+      # Repository:
+      # simota1987/Sana_Sprint
+      #
+      # This is the Android/MNN conversion.
+      # ============================================================
+
+      - name: Download Sana-Sprint MNN model
+        shell: bash
+        run: |
+          set -e
+
+          MODEL_ROOT="app/src/main/assets/models/sana"
+
+          mkdir -p "$MODEL_ROOT"
+
+          echo "======================================"
+          echo "DOWNLOADING SANA-SPRINT 0.6B MNN"
+          echo "======================================"
+
+          git clone \
+            --depth 1 \
+            https://huggingface.co/simota1987/Sana_Sprint \
+            /tmp/Sana_Sprint
+
+          echo ""
+          echo "Downloaded repository:"
+          du -sh /tmp/Sana_Sprint
+
+          echo ""
+          echo "Repository files:"
+          find /tmp/Sana_Sprint \
+            -maxdepth 3 \
+            -type f \
+            -printf '%p\n' \
+            | sort
+
+
+      # ============================================================
+      # 7. Locate model files
+      # ============================================================
+
+      - name: Locate Sana model files
+        shell: bash
+        run: |
+          set -e
+
+          SRC="/tmp/Sana_Sprint"
+
+          echo "======================================"
+          echo "SEARCHING FOR SANA MODEL FILES"
+          echo "======================================"
+
+          echo ""
+          echo "DIT:"
+          find "$SRC" \
+            -type f \
+            \( \
+              -name "dit.mnn" \
+              -o \
+              -name "dit.mnn.weight" \
+            \) \
+            -print
+
+          echo ""
+          echo "VAE:"
+          find "$SRC" \
+            -type f \
+            \( \
+              -name "vae_decoder.mnn" \
+              -o \
+              -name "vae_decoder.mnn.weight" \
+              -o \
+              -name "vae_decoder_tile.mnn" \
+              -o \
+              -name "vae_decoder_tile.mnn.weight" \
+            \) \
+            -print
+
+          echo ""
+          echo "GEMMA:"
+          find "$SRC" \
+            -type f \
+            \( \
+              -name "tokenizer.json" \
+              -o \
+              -name "token_emb.bin" \
+              -o \
+              -name "gemma_meta.json" \
+              -o \
+              -name "gemma_chunk*.mnn" \
+              -o \
+              -name "gemma_chunk*.mnn.weight" \
+            \) \
+            -print
+
+
+      # ============================================================
+      # 8. Validate required model files
+      # ============================================================
+
+      - name: Validate Sana model
+        shell: bash
+        run: |
+          set -e
+
+          SRC="/tmp/Sana_Sprint"
+
+          echo "======================================"
+          echo "VALIDATING SANA MODEL"
+          echo "======================================"
+
+          DIT="$(find "$SRC" \
+            -type f \
+            -name "dit.mnn" \
+            -print \
+            -quit)"
+
+          VAE="$(find "$SRC" \
+            -type f \
+            -name "vae_decoder.mnn" \
+            -print \
+            -quit)"
+
+          TOKENIZER="$(find "$SRC" \
+            -type f \
+            -name "tokenizer.json" \
+            -print \
+            -quit)"
+
+          TOKEN_EMB="$(find "$SRC" \
+            -type f \
+            -name "token_emb.bin" \
+            -print \
+            -quit)"
+
+          if [ -z "$DIT" ]; then
+            echo "ERROR: dit.mnn not found."
+            exit 1
+          fi
+
+          if [ -z "$VAE" ]; then
+            echo "ERROR: vae_decoder.mnn not found."
+            exit 1
+          fi
+
+          if [ -z "$TOKENIZER" ]; then
+            echo "ERROR: tokenizer.json not found."
+            exit 1
+          fi
+
+          if [ -z "$TOKEN_EMB" ]; then
+            echo "ERROR: token_emb.bin not found."
+            exit 1
+          fi
+
+          echo "Required Sana files found."
+
+          echo ""
+          echo "DIT:"
+          ls -lh "$DIT"
+
+          echo ""
+          echo "VAE:"
+          ls -lh "$VAE"
+
+          echo ""
+          echo "Tokenizer:"
+          ls -lh "$TOKENIZER"
+
+          echo ""
+          echo "Token embeddings:"
+          ls -lh "$TOKEN_EMB"
+
+
+      # ============================================================
+      # 9. Install model into Android assets
+      # ============================================================
+
+      - name: Install Sana model assets
+        shell: bash
+        run: |
+          set -e
+
+          SRC="/tmp/Sana_Sprint"
+          DEST="app/src/main/assets/models/sana"
+
+          mkdir -p "$DEST"
+          mkdir -p "$DEST/gemma"
+
+          echo "======================================"
+          echo "INSTALLING SANA MODEL"
+          echo "======================================"
+
+          # --------------------------------------------------------
+          # Main DiT
+          # --------------------------------------------------------
+
+          DIT="$(find "$SRC" \
+            -type f \
+            -name "dit.mnn" \
+            -print \
+            -quit)"
+
+          cp "$DIT" \
+            "$DEST/dit.mnn"
+
+          DIT_WEIGHT="$(find "$SRC" \
+            -type f \
+            -name "dit.mnn.weight" \
+            -print \
+            -quit || true)"
+
+          if [ -n "$DIT_WEIGHT" ]; then
+            cp "$DIT_WEIGHT" \
+              "$DEST/dit.mnn.weight"
+          fi
+
+
+          # --------------------------------------------------------
+          # VAE decoder
+          # --------------------------------------------------------
+
+          VAE="$(find "$SRC" \
+            -type f \
+            -name "vae_decoder.mnn" \
+            -print \
+            -quit)"
+
+          cp "$VAE" \
+            "$DEST/vae_decoder.mnn"
+
+          VAE_WEIGHT="$(find "$SRC" \
+            -type f \
+            -name "vae_decoder.mnn.weight" \
+            -print \
+            -quit || true)"
+
+          if [ -n "$VAE_WEIGHT" ]; then
+            cp "$VAE_WEIGHT" \
+              "$DEST/vae_decoder.mnn.weight"
+          fi
+
+
+          # --------------------------------------------------------
+          # Optional tiled VAE
+          # --------------------------------------------------------
+
+          VAE_TILE="$(find "$SRC" \
+            -type f \
+            -name "vae_decoder_tile.mnn" \
+            -print \
+            -quit || true)"
+
+          if [ -n "$VAE_TILE" ]; then
+
+            cp "$VAE_TILE" \
+              "$DEST/vae_decoder_tile.mnn"
+
+            VAE_TILE_WEIGHT="$(find "$SRC" \
+              -type f \
+              -name "vae_decoder_tile.mnn.weight" \
+              -print \
+              -quit || true)"
+
+            if [ -n "$VAE_TILE_WEIGHT" ]; then
+              cp "$VAE_TILE_WEIGHT" \
+                "$DEST/vae_decoder_tile.mnn.weight"
+            fi
+
+          fi
+
+
+          # --------------------------------------------------------
+          # Gemma tokenizer
+          # --------------------------------------------------------
+
+          TOKENIZER="$(find "$SRC" \
+            -type f \
+            -name "tokenizer.json" \
+            -print \
+            -quit)"
+
+          cp "$TOKENIZER" \
+            "$DEST/gemma/tokenizer.json"
+
+
+          # --------------------------------------------------------
+          # Gemma token embeddings
+          # --------------------------------------------------------
+
+          TOKEN_EMB="$(find "$SRC" \
+            -type f \
+            -name "token_emb.bin" \
+            -print \
+            -quit)"
+
+          cp "$TOKEN_EMB" \
+            "$DEST/gemma/token_emb.bin"
+
+
+          # --------------------------------------------------------
+          # Gemma metadata
+          # --------------------------------------------------------
+
+          GEMMA_META="$(find "$SRC" \
+            -type f \
+            -name "gemma_meta.json" \
+            -print \
+            -quit || true)"
+
+          if [ -n "$GEMMA_META" ]; then
+            cp "$GEMMA_META" \
+              "$DEST/gemma/gemma_meta.json"
+          fi
+
+
+          # --------------------------------------------------------
+          # Gemma MNN chunks
+          # --------------------------------------------------------
+
+          find "$SRC" \
+            -type f \
+            \( \
+              -name "gemma_chunk*.mnn" \
+              -o \
+              -name "gemma_chunk*.mnn.weight" \
+            \) \
+            -exec cp {} "$DEST/gemma/" \;
+
+
+          # --------------------------------------------------------
+          # Marker
+          # --------------------------------------------------------
+
+          printf '%s\n' "SANA" \
+            > "$DEST/SANA"
+
+
+          echo ""
+          echo "Sana model installed."
+
+
+      # ============================================================
+      # 10. Display final model tree
+      # ============================================================
+
+      - name: Verify installed model
+        shell: bash
+        run: |
+          set -e
+
+          MODEL_ROOT="app/src/main/assets/models/sana"
+
+          echo "======================================"
+          echo "FINAL SANA MODEL TREE"
+          echo "======================================"
+
+          find "$MODEL_ROOT" \
+            -type f \
+            -printf '%p  %k KB\n' \
+            | sort
+
+          echo ""
+          echo "TOTAL MODEL SIZE:"
+
+          du -sh "$MODEL_ROOT"
+
+
+      # ============================================================
+      # 11. Cache Sana model
+      # ============================================================
+
+      - name: Cache Sana model
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/assets/models/sana
+          key: sana-sprint-0.6b-mnn-v1-${{ runner.os }}
+
+
+      # ============================================================
+      # 12. Install Gradle
+      # ============================================================
+
+      - name: Install Gradle 8.9
+        shell: bash
+        run: |
+          set -e
+
+          cd "$HOME"
+
+          wget -q \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+            -O gradle.zip
+
+          unzip -q gradle.zip
+
+          echo "$HOME/gradle-8.9/bin" >> "$GITHUB_PATH"
+
+
+      # ============================================================
+      # 13. Verify Gradle
+      # ============================================================
+
+      - name: Verify Gradle
+        shell: bash
+        run: |
+          set -e
+
+          java -version
+
+          gradle --version
+
+
+      # ============================================================
+      # 14. Build APK
+      # ============================================================
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "BUILDING SANA ANDROID APK"
+          echo "======================================"
+
+          gradle \
+            assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+
+      # ============================================================
+      # 15. Verify APK
+      # ============================================================
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK was not created."
+            exit 1
+          fi
+
+          echo "======================================"
+          echo "SANA APK CREATED"
+          echo "======================================"
+
+          ls -lh "$APK"
+
+
+      # ============================================================
+      # 16. Upload APK
+      # ============================================================
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sana-Android-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+
+      # ============================================================
+      # 17. Upload model separately
+      #
+      # Useful for debugging/model inspection.
+      # ============================================================
+
+      - name: Upload Sana model
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sana-Sprint-0.6B-MNN
+          path: app/src/main/assets/models/sana/
+          if-no-files-found: error
