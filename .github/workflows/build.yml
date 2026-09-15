@@ -24,31 +24,52 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Check Android SDK
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Configure Android SDK PATH
+        shell: bash
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "PATH=$PATH"
 
-      - name: Accept Android SDK licenses
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
+          fi
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            echo "sdkmanager not found"
+            find "$ANDROID_HOME" -name sdkmanager -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Using sdkmanager:"
+          echo "$SDKMANAGER"
+
+          echo "ANDROID_SDK_MANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+
+      - name: Accept Android licenses
+        shell: bash
         run: |
-          yes | sdkmanager --licenses || true
+          yes | "$ANDROID_SDK_MANAGER" --licenses || true
 
       - name: Install Android SDK components
+        shell: bash
         run: |
-          sdkmanager --update || true
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
+          "$ANDROID_SDK_MANAGER" "platform-tools"
+          "$ANDROID_SDK_MANAGER" "platforms;android-35"
+          "$ANDROID_SDK_MANAGER" "build-tools;35.0.0"
 
       - name: Verify Android SDK
+        shell: bash
         run: |
-          sdkmanager --list_installed
+          "$ANDROID_SDK_MANAGER" --list_installed
           adb version
-          ls -la "$ANDROID_HOME/platforms/android-35"
-          ls -la "$ANDROID_HOME/build-tools/35.0.0"
 
-      - name: Setup Gradle 8.9
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
