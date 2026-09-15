@@ -23,9 +23,16 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // =====================================================
+        // SANA / MNN IS BUILT FOR ARM64 ONLY
+        // =====================================================
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
-    // Must match the NDK installed by GitHub Actions.
+    // Must match GitHub Actions
     ndkVersion = "27.0.12077973"
 
     externalNativeBuild {
@@ -69,7 +76,11 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
-    }
+        }
+
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 }
 
