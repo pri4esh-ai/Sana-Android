@@ -1,15 +1,17 @@
 #include <jni.h>
 #include <android/log.h>
-#include <android/asset_manager.h>
-#include <android/asset_manager_jni.h>
 
 #include <MNN/Interpreter.hpp>
+#include <MNN/Tensor.hpp>
 #include <MNN/MNNDefine.h>
 
 #include <algorithm>
-#include <cstdint>
+#include <chrono>
+#include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -23,32 +25,6 @@
 
 namespace {
 
-/**
- * Persistent MNN engine.
- *
- * The interpreter and session remain alive between generations.
- *
- * This avoids repeatedly doing:
- *
- *   load model
- *   create interpreter
- *   create session
- *   inference
- *   destroy
- *
- * Instead:
- *
- *   initialize once
- *       |
- *       +--> interpreter
- *       |
- *       +--> session
- *
- *   Generate 1
- *   Generate 2
- *   Generate 3
- *   ...
- */
 class SanaEngine {
 
 public:
@@ -60,8 +36,7 @@ public:
     }
 
     bool initialize(
-            AAssetManager* assetManager,
-            const std::string& assetName,
+            const std::string& modelPath,
             const std::string& cachePath,
             bool preferOpenCl,
             int cpuThreads
@@ -70,179 +45,38 @@ public:
         std::lock_guard<std::mutex> lock(mMutex);
 
         if (mInitialized) {
-
-            LOGI(
-                    "Sana engine already initialized."
-            );
-
             return true;
         }
 
-        if (assetManager == nullptr) {
-
-            setError(
-                    "AssetManager is null."
-            );
-
-            LOGE(
-                    "AssetManager is null."
-            );
-
+        if (modelPath.empty()) {
+            setError("Model path is empty.");
             return false;
         }
 
-        if (assetName.empty()) {
-
-            setError(
-                    "Model asset path is empty."
-            );
-
-            LOGE(
-                    "Model asset path is empty."
-            );
-
-            return false;
-        }
+        LOGI("========================================");
+        LOGI("SANA MNN ENGINE");
+        LOGI("========================================");
 
         LOGI(
-                "========================================"
+                "Model: %s",
+                modelPath.c_str()
         );
 
-        LOGI(
-                "SANA MNN ENGINE INITIALIZATION"
-        );
-
-        LOGI(
-                "========================================"
-        );
-
-        LOGI(
-                "Model asset: %s",
-                assetName.c_str()
-        );
-
-        /*
-         * Open model from Android assets.
-         */
-        AAsset* asset =
-                AAssetManager_open(
-                        assetManager,
-                        assetName.c_str(),
-                        AASSET_MODE_BUFFER
-                );
-
-        if (asset == nullptr) {
-
-            setError(
-                    "Unable to open model asset: " +
-                    assetName
-            );
-
-            LOGE(
-                    "Could not open model asset: %s",
-                    assetName.c_str()
-            );
-
-            return false;
-        }
-
-        const off_t assetLength =
-                AAsset_getLength(asset);
-
-        if (assetLength <= 0) {
-
-            AAsset_close(asset);
-
-            setError(
-                    "Model asset is empty."
-            );
-
-            LOGE(
-                    "Model asset is empty."
-            );
-
-            return false;
-        }
-
-        LOGI(
-                "Model size: %.2f MB",
-                static_cast<double>(assetLength) /
-                (1024.0 * 1024.0)
-        );
-
-        /*
-         * Keep model memory alive for the complete
-         * lifetime of the MNN interpreter.
-         */
-        mModelBuffer.resize(
-                static_cast<size_t>(assetLength)
-        );
-
-        const int64_t bytesRead =
-                AAsset_read(
-                        asset,
-                        mModelBuffer.data(),
-                        static_cast<size_t>(assetLength)
-                );
-
-        AAsset_close(asset);
-
-        if (bytesRead !=
-            static_cast<int64_t>(assetLength)) {
-
-            mModelBuffer.clear();
-
-            setError(
-                    "Failed to read complete MNN model."
-            );
-
-            LOGE(
-                    "Model read failed. Expected=%lld Actual=%lld",
-                    static_cast<long long>(assetLength),
-                    static_cast<long long>(bytesRead)
-            );
-
-            return false;
-        }
-
-        LOGI(
-                "Model loaded into native memory."
-        );
-
-        /*
-         * Create MNN interpreter.
-         */
         mInterpreter.reset(
-                MNN::Interpreter::createFromBuffer(
-                        mModelBuffer.data(),
-                        mModelBuffer.size()
+                MNN::Interpreter::createFromFile(
+                        modelPath.c_str()
                 )
         );
 
         if (!mInterpreter) {
 
-            mModelBuffer.clear();
-
             setError(
-                    "MNN Interpreter creation failed."
-            );
-
-            LOGE(
-                    "MNN Interpreter::createFromBuffer failed."
+                    "MNN createFromFile failed."
             );
 
             return false;
         }
 
-        LOGI(
-                "MNN interpreter created."
-        );
-
-        /*
-         * Configure persistent MNN cache.
-         *
-         * Useful for OpenCL kernel/tuning reuse.
-         */
         if (!cachePath.empty()) {
 
             mCacheFile =
@@ -252,23 +86,11 @@ public:
             mInterpreter->setCacheFile(
                     mCacheFile.c_str()
             );
-
-            LOGI(
-                    "MNN cache: %s",
-                    mCacheFile.c_str()
-            );
         }
 
-        /*
-         * First choice:
-         *
-         * ARM GPU / OpenCL.
-         */
         if (preferOpenCl) {
 
-            LOGI(
-                    "Trying OpenCL backend..."
-            );
+            LOGI("Trying OpenCL / Precision_Low");
 
             if (createSession(
                     MNN_FORWARD_OPENCL,
@@ -277,37 +99,22 @@ public:
             )) {
 
                 mBackend =
-                        "OpenCL / Low Precision";
+                        "OpenCL / FP16 Low Precision";
 
                 mInitialized =
                         true;
 
-                LOGI(
-                        "OpenCL session successfully created."
-                );
-
-                LOGI(
-                        "Sana backend: OpenCL / Low Precision"
-                );
-
                 return true;
             }
 
-            LOGI(
-                    "OpenCL session unavailable."
-            );
-
-            LOGI(
-                    "Falling back to ARM CPU."
-            );
-
             destroySession();
+
+            LOGI(
+                    "OpenCL unavailable. Trying CPU."
+            );
         }
 
-        /*
-         * CPU fallback.
-         */
-        const int safeThreads =
+        const int threads =
                 std::max(
                         1,
                         std::min(
@@ -316,13 +123,9 @@ public:
                         )
                 );
 
-        LOGI(
-                "Trying ARM CPU backend..."
-        );
-
         if (!createSession(
                 MNN_FORWARD_CPU,
-                safeThreads,
+                threads,
                 true
         )) {
 
@@ -330,14 +133,8 @@ public:
 
             mInterpreter.reset();
 
-            mModelBuffer.clear();
-
             setError(
-                    "Unable to create OpenCL or CPU MNN session."
-            );
-
-            LOGE(
-                    "No usable MNN backend could be created."
+                    "Unable to create MNN session."
             );
 
             return false;
@@ -348,19 +145,6 @@ public:
 
         mInitialized =
                 true;
-
-        LOGI(
-                "ARM CPU session successfully created."
-        );
-
-        LOGI(
-                "Sana backend: ARM CPU / Low Precision"
-        );
-
-        LOGI(
-                "CPU threads: %d",
-                safeThreads
-        );
 
         return true;
     }
@@ -373,11 +157,6 @@ public:
     ) {
 
         if (!mInterpreter) {
-
-            LOGE(
-                    "Cannot create session: interpreter is null."
-            );
-
             return false;
         }
 
@@ -386,32 +165,11 @@ public:
         config.type =
                 backend;
 
-        /*
-         * CPU:
-         *     number of CPU threads.
-         *
-         * OpenCL:
-         *     keep conservative because this field
-         *     has different semantics on GPU.
-         */
-        if (backend ==
-            MNN_FORWARD_CPU) {
+        config.numThread =
+                backend == MNN_FORWARD_CPU
+                ? threads
+                : 1;
 
-            config.numThread =
-                    threads;
-
-        } else {
-
-            config.numThread =
-                    1;
-        }
-
-        /*
-         * Backend precision configuration.
-         *
-         * Precision_Low allows MNN to use lower precision
-         * execution where supported.
-         */
         MNN::BackendConfig backendConfig;
 
         if (lowPrecision) {
@@ -419,101 +177,24 @@ public:
             backendConfig.precision =
                     MNN::BackendConfig::Precision_Low;
 
+            backendConfig.memory =
+                    MNN::BackendConfig::Memory_Low;
+
             config.backendConfig =
                     &backendConfig;
         }
-
-        LOGI(
-                "Creating MNN session. backend=%d",
-                static_cast<int>(backend)
-        );
 
         MNN::Session* session =
                 mInterpreter->createSession(
                         config
                 );
 
-        if (session == nullptr) {
-
-            LOGE(
-                    "MNN createSession failed. backend=%d",
-                    static_cast<int>(backend)
-            );
-
+        if (!session) {
             return false;
         }
 
         mSession =
                 session;
-
-        LOGI(
-                "MNN session created."
-        );
-
-        /*
-         * Inspect first session input.
-         *
-         * We do not execute inference yet.
-         *
-         * The actual Sana pipeline will later configure
-         * its text, latent and image tensors.
-         */
-        MNN::Tensor* input =
-                mInterpreter->getSessionInput(
-                        mSession,
-                        nullptr
-                );
-
-        if (input != nullptr) {
-
-            /*
-             * elementSize() is int in the MNN build
-             * currently used by this project.
-             *
-             * Therefore %d is intentional.
-             */
-            LOGI(
-                    "Model input detected. dims=%d elements=%d",
-                    input->dimensions(),
-                    input->elementSize()
-            );
-
-            const std::vector<int> shape =
-                    input->shape();
-
-            std::string shapeString;
-
-            for (
-                    size_t i = 0;
-                    i < shape.size();
-                    ++i
-            ) {
-
-                shapeString +=
-                        std::to_string(
-                                shape[i]
-                        );
-
-                if (
-                        i + 1 <
-                        shape.size()
-                ) {
-
-                    shapeString +=
-                            " x ";
-                }
-            }
-
-            LOGI(
-                    "Input shape: %s",
-                    shapeString.c_str()
-            );
-        } else {
-
-            LOGI(
-                    "MNN session has no unnamed input."
-            );
-        }
 
         return true;
     }
@@ -525,10 +206,6 @@ public:
                 mInterpreter &&
                 mSession
         ) {
-
-            LOGI(
-                    "Releasing MNN session."
-            );
 
             mInterpreter->releaseSession(
                     mSession
@@ -550,10 +227,6 @@ public:
 
         mInterpreter.reset();
 
-        mModelBuffer.clear();
-
-        mModelBuffer.shrink_to_fit();
-
         mBackend =
                 "Not initialized";
 
@@ -563,10 +236,6 @@ public:
 
         mInitialized =
                 false;
-
-        LOGI(
-                "Sana native engine released."
-        );
     }
 
 
@@ -610,8 +279,7 @@ public:
                     mLastError;
         }
 
-        return
-                "Not initialized";
+        return "Not initialized";
     }
 
 
@@ -623,82 +291,551 @@ private:
 
         mLastError =
                 error;
+
+        LOGE(
+                "%s",
+                error.c_str()
+        );
     }
 
 
 private:
 
-    /*
-     * Protects interpreter/session state.
-     */
     mutable std::mutex mMutex;
 
-    /*
-     * Persistent MNN interpreter.
-     */
     std::unique_ptr<MNN::Interpreter>
             mInterpreter;
 
-    /*
-     * Persistent MNN session.
-     */
     MNN::Session*
-            mSession =
-                    nullptr;
+            mSession = nullptr;
 
-    /*
-     * Model memory must remain alive while
-     * the interpreter uses createFromBuffer().
-     */
-    std::vector<uint8_t>
-            mModelBuffer;
-
-    /*
-     * Current backend.
-     */
     std::string
             mBackend =
                     "Not initialized";
 
-    /*
-     * Last initialization error.
-     */
     std::string
             mLastError;
 
-    /*
-     * OpenCL cache file.
-     */
     std::string
             mCacheFile;
 
-    /*
-     * Initialization state.
-     */
     bool
-            mInitialized =
-                    false;
+            mInitialized = false;
 };
 
 
-/*
- * One persistent native engine.
- */
 SanaEngine gEngine;
+
+
+/*
+ * Convert tensor shape to text.
+ */
+std::string shapeString(
+        const std::vector<int>& shape
+) {
+
+    std::ostringstream out;
+
+    out << "[";
+
+    for (
+            size_t i = 0;
+            i < shape.size();
+            ++i
+    ) {
+
+        out << shape[i];
+
+        if (
+                i + 1 <
+                shape.size()
+        ) {
+
+            out << ", ";
+        }
+    }
+
+    out << "]";
+
+    return out.str();
+}
+
+
+/*
+ * Fill a floating point input tensor with zeros.
+ *
+ * Sana exported inputs are floating point tensors.
+ */
+bool fillFloatInput(
+        MNN::Interpreter* interpreter,
+        MNN::Session* session,
+        MNN::Tensor* input,
+        std::string& error
+) {
+
+    if (!input) {
+
+        error =
+                "Input tensor is null.";
+
+        return false;
+    }
+
+    MNN::Tensor host(
+            input,
+            MNN::Tensor::CAFFE
+    );
+
+    const int elements =
+            host.elementSize();
+
+    if (elements <= 0) {
+
+        error =
+                "Input tensor has zero elements.";
+
+        return false;
+    }
+
+    float* data =
+            host.host<float>();
+
+    if (!data) {
+
+        error =
+                "Unable to access host tensor.";
+
+        return false;
+    }
+
+    std::fill(
+            data,
+            data + elements,
+            0.0f
+    );
+
+    /*
+     * The timestep input is normally a scalar.
+     *
+     * A zero timestep is intentionally used for this
+     * structural inference test. This does NOT generate
+     * an image yet.
+     */
+    interpreter->resizeSession(
+            session
+    );
+
+    input->copyFromHostTensor(
+            &host
+    );
+
+    return true;
+}
+
+
+/*
+ * Run one MNN model with dummy tensors.
+ */
+std::string testSingleModel(
+        const std::string& name,
+        const std::string& path,
+        const std::string& cachePath,
+        bool preferOpenCl
+) {
+
+    std::ostringstream result;
+
+    result
+            << "========================================\n"
+            << name
+            << "\n"
+            << "========================================\n";
+
+    LOGI(
+            "Testing model: %s",
+            name.c_str()
+    );
+
+    LOGI(
+            "Path: %s",
+            path.c_str()
+    );
+
+    if (path.empty()) {
+
+        result
+                << "FAIL: empty model path\n";
+
+        return result.str();
+    }
+
+    std::unique_ptr<MNN::Interpreter> interpreter(
+            MNN::Interpreter::createFromFile(
+                    path.c_str()
+            )
+    );
+
+    if (!interpreter) {
+
+        result
+                << "FAIL: MNN could not open model\n";
+
+        return result.str();
+    }
+
+    std::string cacheFile;
+
+    if (!cachePath.empty()) {
+
+        cacheFile =
+                cachePath +
+                "/sana_test_" +
+                name +
+                ".cache";
+
+        interpreter->setCacheFile(
+                cacheFile.c_str()
+        );
+    }
+
+    MNN::ScheduleConfig config;
+
+    if (preferOpenCl) {
+
+        config.type =
+                MNN_FORWARD_OPENCL;
+
+        config.numThread =
+                1;
+
+    } else {
+
+        config.type =
+                MNN_FORWARD_CPU;
+
+        config.numThread =
+                4;
+    }
+
+    MNN::BackendConfig backendConfig;
+
+    backendConfig.precision =
+            MNN::BackendConfig::Precision_Low;
+
+    backendConfig.memory =
+            MNN::BackendConfig::Memory_Low;
+
+    config.backendConfig =
+            &backendConfig;
+
+    MNN::Session* session =
+            interpreter->createSession(
+                    config
+            );
+
+    std::string backendName;
+
+    if (session) {
+
+        backendName =
+                preferOpenCl
+                ? "OpenCL / FP16"
+                : "CPU / Low Precision";
+
+    } else if (preferOpenCl) {
+
+        LOGI(
+                "%s: OpenCL failed. Trying CPU.",
+                name.c_str()
+        );
+
+        config.type =
+                MNN_FORWARD_CPU;
+
+        config.numThread =
+                4;
+
+        session =
+                interpreter->createSession(
+                        config
+                );
+
+        backendName =
+                "ARM CPU / Low Precision";
+    }
+
+    if (!session) {
+
+        result
+                << "FAIL: session creation failed\n";
+
+        return result.str();
+    }
+
+    result
+            << "Backend: "
+            << backendName
+            << "\n";
+
+    /*
+     * Get every model input.
+     *
+     * Transformer:
+     *   hidden_states
+     *   encoder_hidden_states
+     *   timestep
+     *
+     * VAE:
+     *   latent sample
+     *
+     * We discover the actual exported names/shapes
+     * instead of hardcoding them.
+     */
+    auto inputs =
+            interpreter->getSessionInputAll(
+                    session
+            );
+
+    if (inputs.empty()) {
+
+        result
+                << "FAIL: no input tensors\n";
+
+        interpreter->releaseSession(
+                session
+        );
+
+        return result.str();
+    }
+
+    result
+            << "Inputs: "
+            << inputs.size()
+            << "\n\n";
+
+    for (const auto& item : inputs) {
+
+        const std::string& inputName =
+                item.first;
+
+        MNN::Tensor* input =
+                item.second;
+
+        result
+                << "Input: "
+                << inputName
+                << "\n";
+
+        result
+                << "Shape: "
+                << shapeString(
+                        input->shape()
+                )
+                << "\n";
+
+        result
+                << "Elements: "
+                << input->elementSize()
+                << "\n";
+
+        std::string error;
+
+        if (!fillFloatInput(
+                interpreter.get(),
+                session,
+                input,
+                error
+        )) {
+
+            result
+                    << "FAIL filling input: "
+                    << error
+                    << "\n";
+
+            interpreter->releaseSession(
+                    session
+            );
+
+            return result.str();
+        }
+    }
+
+    /*
+     * Resize after all tensor information is known.
+     */
+    interpreter->resizeSession(
+            session
+    );
+
+    result
+            << "\nRunning inference...\n";
+
+    const auto start =
+            std::chrono::steady_clock::now();
+
+    MNN::ErrorCode errorCode =
+            interpreter->runSession(
+                    session
+            );
+
+    const auto end =
+            std::chrono::steady_clock::now();
+
+    const double milliseconds =
+            std::chrono::duration<double, std::milli>(
+                    end - start
+            ).count();
+
+    result
+            << "Time: "
+            << milliseconds
+            << " ms\n";
+
+    result
+            << "Error code: "
+            << static_cast<int>(
+                    errorCode
+            )
+            << "\n";
+
+    if (
+            errorCode !=
+            MNN::NO_ERROR
+    ) {
+
+        result
+                << "FAIL: MNN inference error\n";
+
+        interpreter->releaseSession(
+                session
+        );
+
+        return result.str();
+    }
+
+    /*
+     * Inspect outputs.
+     */
+    auto outputs =
+            interpreter->getSessionOutputAll(
+                    session
+            );
+
+    result
+            << "Outputs: "
+            << outputs.size()
+            << "\n";
+
+    for (const auto& item : outputs) {
+
+        MNN::Tensor* output =
+                item.second;
+
+        result
+                << "Output: "
+                << item.first
+                << "\n";
+
+        result
+                << "Shape: "
+                << shapeString(
+                        output->shape()
+                )
+                << "\n";
+
+        result
+                << "Elements: "
+                << output->elementSize()
+                << "\n";
+    }
+
+    result
+            << "\nPASS: model executed\n";
+
+    /*
+     * Very important for this test:
+     *
+     * Transformer is released before VAE starts.
+     *
+     * This avoids unnecessarily keeping both huge
+     * model sessions alive at once.
+     */
+    interpreter->releaseSession(
+            session
+    );
+
+    interpreter.reset();
+
+    return result.str();
+}
+
+
+/*
+ * Test Transformer then VAE sequentially.
+ */
+std::string testModels(
+        const std::string& transformerPath,
+        const std::string& vaePath,
+        const std::string& cachePath,
+        bool preferOpenCl
+) {
+
+    std::ostringstream result;
+
+    result
+            << "SANA 0.6B / 512 MODEL TEST\n\n";
+
+    result
+            << "Transformer file:\n"
+            << transformerPath
+            << "\n\n";
+
+    result
+            << "VAE file:\n"
+            << vaePath
+            << "\n\n";
+
+    /*
+     * Transformer first.
+     */
+    result
+            << testSingleModel(
+                    "transformer",
+                    transformerPath,
+                    cachePath,
+                    preferOpenCl
+            );
+
+    result
+            << "\n\n";
+
+    /*
+     * VAE second.
+     */
+    result
+            << testSingleModel(
+                    "vae_decoder",
+                    vaePath,
+                    cachePath,
+                    preferOpenCl
+            );
+
+    result
+            << "\n\n========================================\n"
+            << "TEST COMPLETE\n"
+            << "========================================\n";
+
+    return result.str();
+}
 
 } // namespace
 
 
-/*
- * ============================================================
- * JNI: INITIALIZE
- * ============================================================
- */
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_sana_android_engine_NativeSana_nativeInitialize(
         JNIEnv* env,
-        jobject thiz,
+        jobject,
         jobject assetManager,
         jstring modelAsset,
         jstring cachePath,
@@ -706,187 +843,191 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
         jint cpuThreads
 ) {
 
-    if (assetManager == nullptr) {
-
-        LOGE(
-                "AssetManager is null."
-        );
-
-        return JNI_FALSE;
-    }
-
-    if (modelAsset == nullptr) {
-
-        LOGE(
-                "Model asset string is null."
-        );
-
-        return JNI_FALSE;
-    }
-
     /*
-     * Convert model asset path from Java/Kotlin string.
+     * Kept for compatibility with the existing engine.
+     *
+     * The new model-test UI does not use this method.
      */
-    const char* modelAssetChars =
-            env->GetStringUTFChars(
-                    modelAsset,
-                    nullptr
-            );
+    return JNI_FALSE;
+}
 
-    if (modelAssetChars == nullptr) {
 
-        LOGE(
-                "Unable to read model asset string."
-        );
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
+        JNIEnv*,
+        jobject
+) {
 
-        return JNI_FALSE;
-    }
-
-    std::string assetName(
-            modelAssetChars
-    );
-
-    env->ReleaseStringUTFChars(
-            modelAsset,
-            modelAssetChars
-    );
-
-    /*
-     * Convert cache path.
-     */
-    std::string cacheDirectory;
-
-    if (cachePath != nullptr) {
-
-        const char* cacheChars =
-                env->GetStringUTFChars(
-                        cachePath,
-                        nullptr
-                );
-
-        if (cacheChars != nullptr) {
-
-            cacheDirectory =
-                    cacheChars;
-
-            env->ReleaseStringUTFChars(
-                    cachePath,
-                    cacheChars
-            );
-        }
-    }
-
-    /*
-     * Convert Java AssetManager to native
-     * AAssetManager.
-     */
-    AAssetManager* nativeAssetManager =
-            AAssetManager_fromJava(
-                    env,
-                    assetManager
-            );
-
-    if (nativeAssetManager == nullptr) {
-
-        LOGE(
-                "AAssetManager_fromJava failed."
-        );
-
-        return JNI_FALSE;
-    }
-
-    /*
-     * Initialize persistent MNN engine.
-     */
-    const bool result =
-            gEngine.initialize(
-                    nativeAssetManager,
-                    assetName,
-                    cacheDirectory,
-                    preferOpenCl == JNI_TRUE,
-                    static_cast<int>(
-                            cpuThreads
-                    )
-            );
-
-    return result
+    return gEngine.initialized()
            ? JNI_TRUE
            : JNI_FALSE;
 }
 
 
-/*
- * ============================================================
- * JNI: IS INITIALIZED
- * ============================================================
- */
-extern "C"
-JNIEXPORT jboolean JNICALL
-Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
-        JNIEnv* env,
-        jobject thiz
-) {
-
-    return
-            gEngine.initialized()
-            ? JNI_TRUE
-            : JNI_FALSE;
-}
-
-
-/*
- * ============================================================
- * JNI: GET BACKEND
- * ============================================================
- */
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeGetBackend(
         JNIEnv* env,
-        jobject thiz
+        jobject
 ) {
 
-    const std::string backend =
+    const std::string value =
             gEngine.backend();
 
     return env->NewStringUTF(
-            backend.c_str()
+            value.c_str()
     );
 }
 
 
-/*
- * ============================================================
- * JNI: GET STATUS
- * ============================================================
- */
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeGetStatus(
         JNIEnv* env,
-        jobject thiz
+        jobject
 ) {
 
-    const std::string status =
+    const std::string value =
             gEngine.status();
 
     return env->NewStringUTF(
-            status.c_str()
+            value.c_str()
     );
 }
 
 
-/*
- * ============================================================
- * JNI: RELEASE
- * ============================================================
- */
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_sana_android_engine_NativeSana_nativeRelease(
-        JNIEnv* env,
-        jobject thiz
+        JNIEnv*,
+        jobject
 ) {
 
     gEngine.release();
+}
+
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_sana_android_engine_NativeSana_nativeTestModels(
+        JNIEnv* env,
+        jobject,
+        jstring transformerPath,
+        jstring vaePath,
+        jstring cachePath,
+        jboolean preferOpenCl
+) {
+
+    if (
+            transformerPath == nullptr ||
+            vaePath == nullptr
+    ) {
+
+        return env->NewStringUTF(
+                "FAIL: model path is null."
+        );
+    }
+
+    const char* transformerChars =
+            env->GetStringUTFChars(
+                    transformerPath,
+                    nullptr
+            );
+
+    const char* vaeChars =
+            env->GetStringUTFChars(
+                    vaePath,
+                    nullptr
+            );
+
+    const char* cacheChars =
+            cachePath != nullptr
+            ? env->GetStringUTFChars(
+                    cachePath,
+                    nullptr
+            )
+            : nullptr;
+
+    if (
+            transformerChars == nullptr ||
+            vaeChars == nullptr
+    ) {
+
+        if (transformerChars) {
+            env->ReleaseStringUTFChars(
+                    transformerPath,
+                    transformerChars
+            );
+        }
+
+        if (vaeChars) {
+            env->ReleaseStringUTFChars(
+                    vaePath,
+                    vaeChars
+            );
+        }
+
+        if (cacheChars) {
+            env->ReleaseStringUTFChars(
+                    cachePath,
+                    cacheChars
+            );
+        }
+
+        return env->NewStringUTF(
+                "FAIL: unable to read model paths."
+        );
+    }
+
+    std::string transformer(
+            transformerChars
+    );
+
+    std::string vae(
+            vaeChars
+    );
+
+    std::string cache;
+
+    if (cacheChars) {
+
+        cache =
+                cacheChars;
+    }
+
+    env->ReleaseStringUTFChars(
+            transformerPath,
+            transformerChars
+    );
+
+    env->ReleaseStringUTFChars(
+            vaePath,
+            vaeChars
+    );
+
+    if (cacheChars) {
+
+        env->ReleaseStringUTFChars(
+                cachePath,
+                cacheChars
+        );
+    }
+
+    /*
+     * Run synchronously.
+     *
+     * Kotlin calls this from a background thread.
+     */
+    const std::string output =
+            testModels(
+                    transformer,
+                    vae,
+                    cache,
+                    preferOpenCl == JNI_TRUE
+            );
+
+    return env->NewStringUTF(
+            output.c_str()
+    );
 }
