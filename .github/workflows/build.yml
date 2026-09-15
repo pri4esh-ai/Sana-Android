@@ -133,11 +133,6 @@ jobs:
 
       # ============================================================
       # 7. Verify MNN headers
-      #
-      # This prevents the previous:
-      # MNN/Interpreter.hpp file not found
-      #
-      # We locate the REAL header and show its directory.
       # ============================================================
       - name: Verify MNN headers
         shell: bash
@@ -177,7 +172,9 @@ jobs:
 
           echo ""
           echo "Header test:"
-          test -f "$MNN_INCLUDE_DIR/MNN/Interpreter.hpp"
+
+          test -f \
+            "$MNN_INCLUDE_DIR/MNN/Interpreter.hpp"
 
           echo "MNN header verification successful."
 
@@ -193,16 +190,7 @@ jobs:
             app/src/main/jniLibs/arm64-v8a
 
       # ============================================================
-      # 9. CACHE COMPILED MNN
-      #
-      # First build:
-      #   MNN compiles normally.
-      #
-      # Later builds:
-      #   libMNN.so is restored from GitHub cache.
-      #
-      # If MNN build settings change:
-      #   change v1 -> v2
+      # 9. Restore compiled MNN cache
       # ============================================================
       - name: Restore MNN native cache
         id: mnn-cache
@@ -213,7 +201,7 @@ jobs:
           key: sana-mnn-arm64-opencl-ndk27-v1
 
       # ============================================================
-      # 10. Build MNN ONLY when cache misses
+      # 10. Build MNN only when cache misses
       # ============================================================
       - name: Build MNN Android
         if: steps.mnn-cache.outputs.cache-hit != 'true'
@@ -251,7 +239,7 @@ jobs:
             --parallel 2
 
       # ============================================================
-      # 11. Locate and install libMNN.so
+      # 11. Install MNN shared library
       # ============================================================
       - name: Install MNN shared library
         shell: bash
@@ -375,12 +363,91 @@ jobs:
           gradle --version
 
       # ============================================================
-      # 15. Build APK
+      # 15. DIAGNOSTIC: VERIFY ACTUAL CMAKE FILE
+      # ============================================================
+      - name: Verify Sana CMake configuration
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "ACTUAL SANA CMAKE FILE"
+          echo "======================================"
+
+          test -f \
+            app/src/main/cpp/CMakeLists.txt
+
+          sed -n '1,260p' \
+            app/src/main/cpp/CMakeLists.txt
+
+          echo ""
+          echo "======================================"
+          echo "SEARCHING REPOSITORY FOR OLD MNN PATH"
+          echo "======================================"
+
+          grep -Rni \
+            --exclude-dir=.git \
+            --exclude-dir=build \
+            --exclude-dir=.cxx \
+            "MNN/source" \
+            . || true
+
+          echo ""
+          echo "======================================"
+          echo "SEARCHING NATIVE CODE FOR MNN PATHS"
+          echo "======================================"
+
+          grep -Rni \
+            --exclude-dir=.git \
+            --exclude-dir=build \
+            --exclude-dir=.cxx \
+            "MNN" \
+            app/src/main/cpp \
+            || true
+
+      # ============================================================
+      # 16. FORCE CLEAN NATIVE CMAKE CACHE
+      # ============================================================
+      - name: Clean native CMake cache
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "CLEANING NATIVE CMAKE CACHE"
+          echo "======================================"
+
+          rm -rf app/.cxx
+          rm -rf app/build
+          rm -rf .cxx
+
+          echo ""
+          echo "Searching for remaining CMake caches..."
+
+          find app \
+            -type d \
+            \( \
+              -name ".cxx" \
+              -o \
+              -name "cmake-build*" \
+            \) \
+            -print \
+            || true
+
+          echo ""
+          echo "Native CMake cache cleaned."
+
+      # ============================================================
+      # 17. Build APK
       # ============================================================
       - name: Build Debug APK
         shell: bash
         run: |
           set -e
+
+          echo "======================================"
+          echo "BUILDING SANA APK"
+          echo "======================================"
 
           gradle \
             assembleDebug \
@@ -388,7 +455,7 @@ jobs:
             --stacktrace
 
       # ============================================================
-      # 16. Verify APK
+      # 18. Verify APK
       # ============================================================
       - name: Verify APK
         shell: bash
@@ -406,7 +473,7 @@ jobs:
           ls -lh "$APK"
 
       # ============================================================
-      # 17. Upload APK
+      # 19. Upload APK
       # ============================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
