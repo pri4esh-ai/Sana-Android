@@ -31,7 +31,7 @@ jobs:
           java-version: '17'
 
       # --------------------------------------------------
-      # 3. Install Android SDK manually
+      # 3. Install Android SDK
       # --------------------------------------------------
       - name: Install Android SDK
         shell: bash
@@ -39,15 +39,24 @@ jobs:
           set -e
 
           SDK_ROOT="$HOME/android-sdk"
+
           mkdir -p "$SDK_ROOT"
 
           cd "$HOME"
 
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip -O commandlinetools.zip
+          wget -q \
+            https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip \
+            -O commandlinetools.zip
 
           mkdir -p "$SDK_ROOT/cmdline-tools"
-          unzip -q commandlinetools.zip -d "$SDK_ROOT/cmdline-tools"
-          mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+
+          unzip -q \
+            commandlinetools.zip \
+            -d "$SDK_ROOT/cmdline-tools"
+
+          mv \
+            "$SDK_ROOT/cmdline-tools/cmdline-tools" \
+            "$SDK_ROOT/cmdline-tools/latest"
 
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
@@ -61,7 +70,12 @@ jobs:
       - name: Verify sdkmanager
         shell: bash
         run: |
+          set -e
+
+          echo "ANDROID_HOME=$ANDROID_HOME"
+
           which sdkmanager
+
           sdkmanager --version
 
       # --------------------------------------------------
@@ -83,52 +97,36 @@ jobs:
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
-            "build-tools;35.0.0"
+            "build-tools;35.0.0" \
+            "cmake;3.31.6" \
+            "ndk;27.0.12077973"
 
       # --------------------------------------------------
-      # 7. Clone MNN
+      # 7. Verify NDK and CMake
       # --------------------------------------------------
-      - name: Clone MNN
+      - name: Verify native toolchain
         shell: bash
-        run: |
-          git clone --depth 1 https://github.com/alibaba/MNN.git mnn
-
-      # --------------------------------------------------
-      # 8. Build MNN
-      # --------------------------------------------------
-      - name: Build MNN
-        shell: bash
-        env:
-          ANDROID_NDK: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
         run: |
           set -e
 
-          mkdir -p mnn/build-android
-          cd mnn/build-android
+          NDK="$ANDROID_HOME/ndk/27.0.12077973"
+          CMAKE="$ANDROID_HOME/cmake/3.31.6/bin/cmake"
 
-          cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-26 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DMNN_OPENCL=ON \
-            -DMNN_ARM82=ON \
-            -DMNN_LOW_MEMORY=ON \
-            -DMNN_BUILD_LLM=ON \
-            -DMNN_SUPPORT_TRANSFORMER_FUSE=ON
+          echo "NDK:"
+          "$NDK/ndk-build" --version || true
 
-          cmake --build . --parallel 2
+          echo ""
+          echo "Toolchain:"
+          test -f "$NDK/build/cmake/android.toolchain.cmake"
 
-      # --------------------------------------------------
-      # 9. Verify MNN
-      # --------------------------------------------------
-      - name: Verify MNN
-        shell: bash
-        run: |
-          find mnn/build-android \( -name "libMNN*.so" -o -name "libMNN_Express*.so" \)
+          echo "android.toolchain.cmake found"
+
+          echo ""
+          echo "CMake:"
+          "$CMAKE" --version
 
       # --------------------------------------------------
-      # 10. Setup Gradle
+      # 8. Setup Gradle
       # --------------------------------------------------
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -136,32 +134,41 @@ jobs:
           gradle-version: '8.9'
 
       # --------------------------------------------------
-      # 11. Verify Gradle
+      # 9. Gradle version
       # --------------------------------------------------
       - name: Gradle version
+        shell: bash
         run: |
           java -version
           gradle --version
 
       # --------------------------------------------------
-      # 12. Build APK
+      # 10. Build APK
       # --------------------------------------------------
       - name: Build Debug APK
         shell: bash
         run: |
-          gradle assembleDebug --no-daemon --stacktrace
+          set -e
+
+          gradle \
+            assembleDebug \
+            --no-daemon \
+            --stacktrace
 
       # --------------------------------------------------
-      # 13. Verify APK
+      # 11. Verify APK
       # --------------------------------------------------
       - name: Verify APK
         shell: bash
         run: |
+          set -e
+
           test -f app/build/outputs/apk/debug/app-debug.apk
+
           ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       # --------------------------------------------------
-      # 14. Upload APK
+      # 12. Upload APK
       # --------------------------------------------------
       - name: Upload APK
         uses: actions/upload-artifact@v4
