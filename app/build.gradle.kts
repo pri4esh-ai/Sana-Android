@@ -25,7 +25,8 @@ android {
         }
     }
 
-    ndkVersion = "27.2.12479018"
+    // Must match the NDK installed by GitHub Actions.
+    ndkVersion = "27.0.12077973"
 
     externalNativeBuild {
         cmake {
@@ -73,8 +74,6 @@ android {
 }
 
 dependencies {
-
-    // Compose BOM — supplies versions for Compose libraries
     implementation(platform("androidx.compose:compose-bom:2025.01.00"))
 
     implementation("androidx.core:core-ktx:1.15.0")
