@@ -1,0 +1,272 @@
+name: Convert Sana 0.6B 512px to MNN
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sana-conversion
+  cancel-in-progress: false
+
+jobs:
+  convert:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install huggingface_hub==0.36.0
+          pip install onnx==1.17.0
+          pip install onnxruntime==1.20.1
+          pip install numpy==1.26.4
+
+      - name: Download MNN source
+        run: |
+          git clone --depth 1 https://github.com/alibaba/MNN.git third_party/MNN
+
+      - name: Build MNNConvert
+        working-directory: third_party/MNN
+        run: |
+          mkdir -p build
+          cd build
+
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMNN_BUILD_CONVERTER=ON \
+            -DMNN_BUILD_SHARED_LIBS=OFF \
+            -DMNN_OPENCL=ON \
+            -DMNN_ARM82=ON \
+            -DMNN_BUILD_LLM=OFF \
+            -DMNN_BUILD_DIFFUSION=ON \
+            -DMNN_SEP_BUILD=OFF \
+            -DMNN_SUPPORT_TRANSFORMER_FUSE=ON \
+            -DMNN_BUILD_OPENCV=OFF \
+            -DMNN_IMGCODECS=OFF
+
+          cmake --build . \
+            --target MNNConvert \
+            --parallel 2
+
+      - name: Verify MNNConvert
+        run: |
+          test -x third_party/MNN/build/MNNConvert
+          third_party/MNN/build/MNNConvert --help | head -40
+
+      - name: Download Sana 0.6B 512px FP16 ONNX
+        run: |
+          mkdir -p models/sana_onnx
+
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+
+          snapshot_download(
+              repo_id="IlyasMoutawwakil/Sana_600M_512px_diffusers_fp16_onnx",
+              local_dir="models/sana_onnx",
+              local_dir_use_symlinks=False
+          )
+          PY
+
+      - name: Inspect downloaded Sana model
+        run: |
+          echo "===== Sana model files ====="
+          find models/sana_onnx -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
+
+          echo
+          echo "===== ONNX files ====="
+          find models/sana_onnx -type f \
+            \( -name "*.onnx" -o -name "*.onnx.data" \) \
+            -printf '%p %s bytes\n' | sort
+
+      - name: Validate ONNX models
+        run: |
+          python - <<'PY'
+          import os
+          import onnx
+
+          root = "models/sana_onnx"
+
+          onnx_files = []
+
+          for base, _, files in os.walk(root):
+              for name in files:
+                  if name.endswith(".onnx"):
+                      onnx_files.append(os.path.join(base, name))
+
+          print("Found ONNX files:")
+          for path in sorted(onnx_files):
+              print(" -", path)
+
+          if not onnx_files:
+              raise RuntimeError("No ONNX files were downloaded.")
+
+          for path in sorted(onnx_files):
+              print("\nChecking:", path)
+              model = onnx.load(path, load_external_data=False)
+              onnx.checker.check_model(model)
+              print("OK")
+
+          print("\nAll ONNX graphs passed validation.")
+          PY
+
+      - name: Create MNN output directories
+        run: |
+          mkdir -p models/sana_mnn/transformer
+          mkdir -p models/sana_mnn/vae_decoder
+          mkdir -p models/sana_mnn/vae_encoder
+
+      - name: Convert Sana Transformer to MNN
+        run: |
+          TRANSFORMER_ONNX="models/sana_onnx/transformer/model.onnx"
+
+          if [ ! -f "$TRANSFORMER_ONNX" ]; then
+            echo "Transformer ONNX not found:"
+            find models/sana_onnx/transformer -maxdepth 2 -type f -print
+            exit 1
+          fi
+
+          third_party/MNN/build/MNNConvert \
+            -f ONNX \
+            --modelFile "$TRANSFORMER_ONNX" \
+            --MNNModel models/sana_mnn/transformer/transformer.mnn \
+            --fp16 \
+            --optimizePrefer=2 \
+            --transformerFuse=1 \
+            --saveExternalData
+
+      - name: Convert Sana VAE Decoder to MNN
+        run: |
+          VAE_ONNX="models/sana_onnx/vae_decoder/model.onnx"
+
+          if [ ! -f "$VAE_ONNX" ]; then
+            echo "VAE decoder ONNX not found:"
+            find models/sana_onnx/vae_decoder -maxdepth 2 -type f -print
+            exit 1
+          fi
+
+          third_party/MNN/build/MNNConvert \
+            -f ONNX \
+            --modelFile "$VAE_ONNX" \
+            --MNNModel models/sana_mnn/vae_decoder/vae_decoder.mnn \
+            --fp16 \
+            --optimizePrefer=2 \
+            --saveExternalData
+
+      - name: Convert Sana VAE Encoder to MNN
+        run: |
+          VAE_ONNX="models/sana_onnx/vae_encoder/model.onnx"
+
+          if [ ! -f "$VAE_ONNX" ]; then
+            echo "VAE encoder ONNX not found:"
+            find models/sana_onnx/vae_encoder -maxdepth 2 -type f -print
+            exit 1
+          fi
+
+          third_party/MNN/build/MNNConvert \
+            -f ONNX \
+            --modelFile "$VAE_ONNX" \
+            --MNNModel models/sana_mnn/vae_encoder/vae_encoder.mnn \
+            --fp16 \
+            --optimizePrefer=2 \
+            --saveExternalData
+
+      - name: Copy Sana configuration
+        run: |
+          cp -r models/sana_onnx/transformer \
+            models/sana_mnn/
+
+          cp -r models/sana_onnx/vae_decoder \
+            models/sana_mnn/
+
+          if [ -d models/sana_onnx/vae_encoder ]; then
+            cp -r models/sana_onnx/vae_encoder \
+              models/sana_mnn/
+          fi
+
+          if [ -d models/sana_onnx/scheduler ]; then
+            cp -r models/sana_onnx/scheduler \
+              models/sana_mnn/
+          fi
+
+          if [ -d models/sana_onnx/tokenizer ]; then
+            cp -r models/sana_onnx/tokenizer \
+              models/sana_mnn/
+          fi
+
+      - name: Generate conversion manifest
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import hashlib
+
+          root = "models/sana_mnn"
+          files = []
+
+          for base, _, names in os.walk(root):
+              for name in names:
+                  path = os.path.join(base, name)
+
+                  sha = hashlib.sha256()
+
+                  with open(path, "rb") as f:
+                      while True:
+                          chunk = f.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          sha.update(chunk)
+
+                  files.append({
+                      "path": os.path.relpath(path, root),
+                      "size": os.path.getsize(path),
+                      "sha256": sha.hexdigest()
+                  })
+
+          manifest = {
+              "model": "Sana_600M_512px",
+              "source": "IlyasMoutawwakil/Sana_600M_512px_diffusers_fp16_onnx",
+              "resolution": 512,
+              "transformer_precision": "fp16",
+              "runtime": "MNN",
+              "files": sorted(files, key=lambda x: x["path"])
+          }
+
+          with open(
+              os.path.join(root, "conversion_manifest.json"),
+              "w"
+          ) as f:
+              json.dump(manifest, f, indent=2)
+
+          print(json.dumps(manifest, indent=2))
+          PY
+
+      - name: Show final model size
+        run: |
+          echo "===== Converted Sana model ====="
+          du -h -d 3 models/sana_mnn || true
+
+          echo
+          echo "===== Total size ====="
+          du -sh models/sana_mnn
+
+          echo
+          echo "===== Files ====="
+          find models/sana_mnn -type f -printf '%p %s bytes\n' | sort
+
+      - name: Upload converted Sana model
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sana-0.6B-512-MNN
+          path: models/sana_mnn/
+          compression-level: 0
+          retention-days: 7
