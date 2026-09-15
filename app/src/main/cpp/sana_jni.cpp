@@ -17,9 +17,27 @@ Java_com_sana_android_engine_NativeSana_nativeIsAvailable(
         JNIEnv* env,
         jobject thiz
 ) {
-    LOGI("Sana native library loaded");
+    LOGI("MNN header successfully linked.");
 
-    return JNI_TRUE;
+    try {
+        MNN::Interpreter* interpreter = MNN::Interpreter::createFromBuffer(
+                nullptr,
+                0
+        );
+
+        if (interpreter != nullptr) {
+            delete interpreter;
+            LOGI("MNN interpreter initialized.");
+            return JNI_TRUE;
+        }
+
+        LOGE("MNN interpreter returned null.");
+        return JNI_FALSE;
+
+    } catch (...) {
+        LOGE("MNN interpreter initialization failed.");
+        return JNI_FALSE;
+    }
 }
 
 extern "C"
@@ -28,35 +46,7 @@ Java_com_sana_android_engine_NativeSana_nativeGetBackend(
         JNIEnv* env,
         jobject thiz
 ) {
-    const char* backend =
-            "MNN / OpenCL / ARM FP16";
-
-    return env->NewStringUTF(backend);
-}
-
-extern "C"
-JNIEXPORT jboolean JNICALL
-Java_com_sana_android_engine_NativeSana_nativeMnnAvailable(
-        JNIEnv* env,
-        jobject thiz
-) {
-    try {
-        MNN::Interpreter* interpreter =
-                MNN::Interpreter::createFromBuffer(
-                        nullptr,
-                        0
-                );
-
-        if (interpreter != nullptr) {
-            delete interpreter;
-
-            LOGI("MNN runtime is linked successfully");
-
-            return JNI_TRUE;
-        }
-    } catch (...) {
-        LOGE("MNN runtime test failed");
-    }
-
-    return JNI_FALSE;
+    return env->NewStringUTF(
+            "MNN / OpenCL / ARM FP16"
+    );
 }
