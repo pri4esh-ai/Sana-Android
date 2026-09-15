@@ -34,8 +34,28 @@ private fun SanaApp() {
     var fastMode by remember { mutableStateOf(true) }
     var generating by remember { mutableStateOf(false) }
 
-    val nativeAvailable = remember { NativeSana.isAvailable() }
-    val backend = remember { NativeSana.backend() }
+    /*
+     * NativeSana no longer has isAvailable().
+     *
+     * The new native API exposes:
+     * - isInitialized()
+     * - backend()
+     * - status()
+     *
+     * The actual Sana .mnn model will be initialized later,
+     * after the model assets are added.
+     */
+    val nativeInitialized = remember {
+        NativeSana.isInitialized()
+    }
+
+    val backend = remember {
+        NativeSana.backend()
+    }
+
+    val status = remember {
+        NativeSana.status()
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -72,25 +92,30 @@ private fun SanaApp() {
                 ) {
 
                     Text(
-                        "Native Engine",
+                        text = "Native Engine",
                         fontWeight = FontWeight.Bold
                     )
 
                     Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        if (nativeAvailable)
-                            "✓ Loaded"
+                        text = if (nativeInitialized)
+                            "✓ Initialized"
                         else
-                            "✗ Not Loaded",
-                        color = if (nativeAvailable)
+                            "○ Waiting for model",
+                        color = if (nativeInitialized)
                             Color(0xFF2E7D32)
                         else
-                            Color.Red
+                            Color.Gray
                     )
 
                     Text(
-                        "Backend: $backend",
+                        text = "Backend: $backend",
+                        color = Color.Gray
+                    )
+
+                    Text(
+                        text = "Status: $status",
                         color = Color.Gray
                     )
                 }
@@ -105,7 +130,9 @@ private fun SanaApp() {
                     .fillMaxWidth()
                     .height(150.dp),
                 shape = RoundedCornerShape(18.dp),
-                label = { Text("Prompt") },
+                label = {
+                    Text("Prompt")
+                },
                 placeholder = {
                     Text("Describe the image you want...")
                 }
@@ -122,12 +149,12 @@ private fun SanaApp() {
                 Column {
 
                     Text(
-                        "Fast mode",
+                        text = "Fast mode",
                         fontWeight = FontWeight.SemiBold
                     )
 
                     Text(
-                        if (fastMode)
+                        text = if (fastMode)
                             "Optimized generation"
                         else
                             "Higher quality",
@@ -146,13 +173,15 @@ private fun SanaApp() {
             Spacer(modifier = Modifier.height(18.dp))
 
             Text(
-                "Steps: ${steps.toInt()}",
+                text = "Steps: ${steps.toInt()}",
                 fontWeight = FontWeight.SemiBold
             )
 
             Slider(
                 value = steps,
-                onValueChange = { steps = it },
+                onValueChange = {
+                    steps = it
+                },
                 valueRange = 1f..8f,
                 steps = 6
             )
@@ -182,7 +211,7 @@ private fun SanaApp() {
                 } else {
 
                     Text(
-                        "Generate",
+                        text = "Generate",
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -195,16 +224,16 @@ private fun SanaApp() {
                     .fillMaxWidth()
                     .height(300.dp)
                     .background(
-                        Color.White,
-                        RoundedCornerShape(22.dp)
+                        color = Color.White,
+                        shape = RoundedCornerShape(22.dp)
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
 
                 Text(
-                    if (generating)
-                        "Preparing Sana engine..."
+                    text = if (generating)
+                        "Sana generation pipeline will appear here"
                     else
                         "Generated image will appear here",
                     color = Color.Gray
