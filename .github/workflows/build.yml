@@ -15,24 +15,24 @@ jobs:
 
     steps:
 
-      # ==========================================
-      # 1. Checkout repository
-      # ==========================================
+      # ============================================================
+      # 1. Checkout Sana Android
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ==========================================
+      # ============================================================
       # 2. Java 17
-      # ==========================================
+      # ============================================================
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # ==========================================
-      # 3. Install Android SDK
-      # ==========================================
+      # ============================================================
+      # 3. Android SDK
+      # ============================================================
       - name: Install Android SDK
         shell: bash
         run: |
@@ -64,35 +64,15 @@ jobs:
           echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
 
-      # ==========================================
-      # 4. Verify Android SDK
-      # ==========================================
-      - name: Verify Android SDK
-        shell: bash
-        run: |
-          set -e
-
-          echo "ANDROID_HOME=$ANDROID_HOME"
-
-          which sdkmanager
-
-          sdkmanager --version
-
-      # ==========================================
-      # 5. Accept Android licenses
-      # ==========================================
-      - name: Accept Android licenses
-        shell: bash
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-
-      # ==========================================
-      # 6. Install Android packages
-      # ==========================================
+      # ============================================================
+      # 4. Android SDK packages
+      # ============================================================
       - name: Install Android packages
         shell: bash
         run: |
           set -e
+
+          yes | sdkmanager --licenses > /dev/null || true
 
           sdkmanager \
             "platform-tools" \
@@ -101,9 +81,9 @@ jobs:
             "cmake;3.31.6" \
             "ndk;27.0.12077973"
 
-      # ==========================================
-      # 7. Verify native toolchain
-      # ==========================================
+      # ============================================================
+      # 5. Verify toolchain
+      # ============================================================
       - name: Verify native toolchain
         shell: bash
         run: |
@@ -130,9 +110,9 @@ jobs:
 
           "$CMAKE" --version
 
-      # ==========================================
-      # 8. Clone MNN
-      # ==========================================
+      # ============================================================
+      # 6. Checkout MNN source
+      # ============================================================
       - name: Checkout MNN
         shell: bash
         run: |
@@ -147,10 +127,47 @@ jobs:
 
           echo "MNN source downloaded."
 
-      # ==========================================
-      # 9. Build MNN
-      # ==========================================
+          echo ""
+          echo "MNN COMMIT:"
+          git -C third_party/MNN rev-parse HEAD
+
+      # ============================================================
+      # 7. Prepare directories
+      # ============================================================
+      - name: Prepare MNN Android library directory
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p \
+            app/src/main/jniLibs/arm64-v8a
+
+      # ============================================================
+      # 8. CACHE COMPILED MNN
+      #
+      # This is the important part.
+      #
+      # First build:
+      #   MNN compiles normally.
+      #
+      # Later builds:
+      #   libMNN.so is restored from GitHub cache.
+      #
+      # If MNN build settings change, change v1 -> v2.
+      # ============================================================
+      - name: Restore MNN native cache
+        id: mnn-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/jniLibs/arm64-v8a/libMNN.so
+          key: sana-mnn-arm64-opencl-ndk27-v1
+
+      # ============================================================
+      # 9. Build MNN ONLY when cache misses
+      # ============================================================
       - name: Build MNN Android
+        if: steps.mnn-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -e
@@ -184,30 +201,87 @@ jobs:
             --config Release \
             --parallel 2
 
-      # ==========================================
-      # 10. Verify MNN
-      # ==========================================
-      - name: Verify MNN library
+      # ============================================================
+      # 10. Locate and install libMNN.so
+      # ============================================================
+      - name: Install MNN shared library
+        shell: bash
+        run: |
+          set -e
+
+          DEST="app/src/main/jniLibs/arm64-v8a/libMNN.so"
+
+          if [ -f "$DEST" ]; then
+            echo "MNN cache hit."
+            echo "Using cached:"
+            ls -lh "$DEST"
+            exit 0
+          fi
+
+          echo "Searching for compiled libMNN.so..."
+
+          MNN_LIB="$(find third_party/MNN \
+            -type f \
+            -name "libMNN.so" \
+            -print \
+            -quit)"
+
+          if [ -z "$MNN_LIB" ]; then
+            echo "ERROR: libMNN.so was not found."
+            echo ""
+            echo "Available MNN libraries:"
+            find third_party/MNN \
+              -type f \
+              \( \
+                -name "libMNN.so" \
+                -o \
+                -name "libMNN.a" \
+              \) \
+              -print
+
+            exit 1
+          fi
+
+          echo "FOUND:"
+          echo "$MNN_LIB"
+
+          cp \
+            "$MNN_LIB" \
+            "$DEST"
+
+          echo ""
+          echo "Installed MNN:"
+          ls -lh "$DEST"
+
+      # ============================================================
+      # 11. Verify MNN
+      # ============================================================
+      - name: Verify MNN integration files
         shell: bash
         run: |
           set -e
 
           echo "======================================"
-          echo "SEARCHING FOR MNN LIBRARIES"
+          echo "MNN INTEGRATION"
           echo "======================================"
 
-          find third_party/MNN \
-            -type f \
-            \( \
-              -name "libMNN.so" \
-              -o \
-              -name "libMNN.a" \
-            \) \
-            -print
+          test -f \
+            app/src/main/jniLibs/arm64-v8a/libMNN.so
 
-      # ==========================================
-      # 11. Install Gradle 8.9
-      # ==========================================
+          test -d \
+            third_party/MNN/source
+
+          echo "MNN library:"
+          ls -lh \
+            app/src/main/jniLibs/arm64-v8a/libMNN.so
+
+          echo ""
+          echo "MNN source:"
+          du -sh third_party/MNN/source
+
+      # ============================================================
+      # 12. Install Gradle 8.9
+      # ============================================================
       - name: Install Gradle 8.9
         shell: bash
         run: |
@@ -223,9 +297,9 @@ jobs:
 
           echo "$HOME/gradle-8.9/bin" >> "$GITHUB_PATH"
 
-      # ==========================================
-      # 12. Verify Gradle
-      # ==========================================
+      # ============================================================
+      # 13. Verify Gradle
+      # ============================================================
       - name: Verify Gradle
         shell: bash
         run: |
@@ -235,9 +309,9 @@ jobs:
 
           gradle --version
 
-      # ==========================================
-      # 13. Build Sana APK
-      # ==========================================
+      # ============================================================
+      # 14. Build APK
+      # ============================================================
       - name: Build Debug APK
         shell: bash
         run: |
@@ -248,9 +322,9 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # ==========================================
-      # 14. Verify APK
-      # ==========================================
+      # ============================================================
+      # 15. Verify APK
+      # ============================================================
       - name: Verify APK
         shell: bash
         run: |
@@ -266,9 +340,9 @@ jobs:
 
           ls -lh "$APK"
 
-      # ==========================================
-      # 15. Upload APK
-      # ==========================================
+      # ============================================================
+      # 16. Upload APK
+      # ============================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
