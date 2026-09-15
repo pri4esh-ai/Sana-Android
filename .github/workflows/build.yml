@@ -16,7 +16,7 @@ jobs:
     steps:
 
       # ==========================================
-      # 1. Checkout
+      # 1. Checkout repository
       # ==========================================
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -65,7 +65,7 @@ jobs:
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
 
       # ==========================================
-      # 4. Verify SDK
+      # 4. Verify Android SDK
       # ==========================================
       - name: Verify Android SDK
         shell: bash
@@ -79,7 +79,7 @@ jobs:
           sdkmanager --version
 
       # ==========================================
-      # 5. Accept licenses
+      # 5. Accept Android licenses
       # ==========================================
       - name: Accept Android licenses
         shell: bash
@@ -102,7 +102,7 @@ jobs:
             "ndk;27.0.12077973"
 
       # ==========================================
-      # 7. Verify NDK
+      # 7. Verify native toolchain
       # ==========================================
       - name: Verify native toolchain
         shell: bash
@@ -113,7 +113,7 @@ jobs:
           CMAKE="$ANDROID_HOME/cmake/3.31.6/bin/cmake"
 
           echo "======================================"
-          echo "ANDROID NDK"
+          echo "NDK"
           echo "======================================"
 
           "$NDK/ndk-build" --version
@@ -148,7 +148,7 @@ jobs:
           echo "MNN source downloaded."
 
       # ==========================================
-      # 9. Build MNN Core
+      # 9. Build MNN
       # ==========================================
       - name: Build MNN Android
         shell: bash
@@ -206,24 +206,37 @@ jobs:
             -print
 
       # ==========================================
-      # 11. Setup Gradle
+      # 11. Install Gradle 8.9
       # ==========================================
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-
-      # ==========================================
-      # 12. Gradle information
-      # ==========================================
-      - name: Gradle version
+      - name: Install Gradle 8.9
         shell: bash
         run: |
+          set -e
+
+          cd "$HOME"
+
+          wget -q \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+            -O gradle.zip
+
+          unzip -q gradle.zip
+
+          echo "$HOME/gradle-8.9/bin" >> "$GITHUB_PATH"
+
+      # ==========================================
+      # 12. Verify Gradle
+      # ==========================================
+      - name: Verify Gradle
+        shell: bash
+        run: |
+          set -e
+
           java -version
+
           gradle --version
 
       # ==========================================
-      # 13. Build APK
+      # 13. Build Sana APK
       # ==========================================
       - name: Build Debug APK
         shell: bash
