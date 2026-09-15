@@ -10,11 +10,14 @@ message(STATUS "SANA NATIVE BUILD")
 message(STATUS "======================================")
 message(STATUS "ANDROID ABI: ${ANDROID_ABI}")
 
-# ---------------------------------------------------------
-# Project root
-# ---------------------------------------------------------
-
-get_filename_component(PROJECT_ROOT
+# Project root:
+# app/src/main/cpp
+#       -> app
+#       -> main
+#       -> src
+#       -> Sana-Android
+get_filename_component(
+    PROJECT_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../"
     ABSOLUTE
 )
@@ -23,43 +26,25 @@ set(MNN_ROOT
     "${PROJECT_ROOT}/third_party/MNN"
 )
 
-# ---------------------------------------------------------
-# Locate MNN headers
-# ---------------------------------------------------------
-
-set(MNN_HEADER_CANDIDATES
+# IMPORTANT:
+# MNN/Interpreter.hpp is under:
+# third_party/MNN/include/MNN/Interpreter.hpp
+set(MNN_INCLUDE_DIR
     "${MNN_ROOT}/include"
-    "${MNN_ROOT}/source"
-    "${MNN_ROOT}/3rd_party"
-    "${MNN_ROOT}"
 )
 
-set(MNN_INCLUDE_DIR "")
-
-foreach(CANDIDATE ${MNN_HEADER_CANDIDATES})
-
-    if(EXISTS "${CANDIDATE}/MNN/Interpreter.hpp")
-        set(MNN_INCLUDE_DIR "${CANDIDATE}")
-        break()
-    endif()
-
-endforeach()
-
-if(MNN_INCLUDE_DIR STREQUAL "")
+if(NOT EXISTS "${MNN_INCLUDE_DIR}/MNN/Interpreter.hpp")
 
     message(FATAL_ERROR
-        "MNN/Interpreter.hpp was not found.\n"
-        "MNN root: ${MNN_ROOT}"
+        "MNN/Interpreter.hpp NOT FOUND.\n"
+        "Expected:\n"
+        "${MNN_INCLUDE_DIR}/MNN/Interpreter.hpp"
     )
 
 endif()
 
 message(STATUS "MNN root: ${MNN_ROOT}")
 message(STATUS "MNN include: ${MNN_INCLUDE_DIR}")
-
-# ---------------------------------------------------------
-# Prebuilt MNN library
-# ---------------------------------------------------------
 
 set(MNN_LIB
     "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libMNN.so"
@@ -68,32 +53,28 @@ set(MNN_LIB
 if(NOT EXISTS "${MNN_LIB}")
 
     message(FATAL_ERROR
-        "MNN shared library not found:\n"
-        "${MNN_LIB}\n\n"
-        "The GitHub Actions workflow must copy libMNN.so "
-        "into app/src/main/jniLibs/arm64-v8a/"
+        "libMNN.so NOT FOUND:\n"
+        "${MNN_LIB}"
     )
 
 endif()
 
 message(STATUS "MNN library: ${MNN_LIB}")
 
-# ---------------------------------------------------------
-# Imported MNN shared library
-# ---------------------------------------------------------
-
-add_library(MNN SHARED IMPORTED)
+add_library(
+    MNN
+    SHARED
+    IMPORTED
+)
 
 set_target_properties(
     MNN
     PROPERTIES
-    IMPORTED_LOCATION "${MNN_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${MNN_INCLUDE_DIR}"
+    IMPORTED_LOCATION
+        "${MNN_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES
+        "${MNN_INCLUDE_DIR}"
 )
-
-# ---------------------------------------------------------
-# Sana JNI
-# ---------------------------------------------------------
 
 add_library(
     sana_native
@@ -107,24 +88,26 @@ target_include_directories(
     "${MNN_INCLUDE_DIR}"
 )
 
-# ---------------------------------------------------------
-# Android libraries
-# ---------------------------------------------------------
+find_library(
+    log-lib
+    log
+)
 
-find_library(log-lib log)
-find_library(android-lib android)
-
-# ---------------------------------------------------------
-# Link
-# ---------------------------------------------------------
+find_library(
+    android-lib
+    android
+)
 
 target_link_libraries(
     sana_native
+
     MNN
+
     ${log-lib}
+
     ${android-lib}
 )
 
 message(STATUS "======================================")
-message(STATUS "MNN CMAKE CONFIGURATION COMPLETE")
+message(STATUS "MNN CONFIGURATION COMPLETE")
 message(STATUS "======================================")
