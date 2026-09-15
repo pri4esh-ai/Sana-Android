@@ -82,7 +82,7 @@ jobs:
             "ndk;27.0.12077973"
 
       # ============================================================
-      # 5. Verify toolchain
+      # 5. Verify native toolchain
       # ============================================================
       - name: Verify native toolchain
         shell: bash
@@ -132,7 +132,57 @@ jobs:
           git -C third_party/MNN rev-parse HEAD
 
       # ============================================================
-      # 7. Prepare directories
+      # 7. Verify MNN headers
+      #
+      # This prevents the previous:
+      # MNN/Interpreter.hpp file not found
+      #
+      # We locate the REAL header and show its directory.
+      # ============================================================
+      - name: Verify MNN headers
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "VERIFYING MNN HEADERS"
+          echo "======================================"
+
+          MNN_HEADER="$(find third_party/MNN \
+            -type f \
+            -path "*/MNN/Interpreter.hpp" \
+            -print \
+            -quit)"
+
+          if [ -z "$MNN_HEADER" ]; then
+            echo "ERROR: MNN/Interpreter.hpp was not found."
+            echo ""
+            echo "Searching MNN directory:"
+            find third_party/MNN \
+              -type f \
+              -name "Interpreter.hpp" \
+              -print
+
+            exit 1
+          fi
+
+          echo "MNN/Interpreter.hpp FOUND:"
+          echo "$MNN_HEADER"
+
+          MNN_INCLUDE_DIR="$(dirname "$(dirname "$MNN_HEADER")")"
+
+          echo ""
+          echo "MNN include directory:"
+          echo "$MNN_INCLUDE_DIR"
+
+          echo ""
+          echo "Header test:"
+          test -f "$MNN_INCLUDE_DIR/MNN/Interpreter.hpp"
+
+          echo "MNN header verification successful."
+
+      # ============================================================
+      # 8. Prepare directories
       # ============================================================
       - name: Prepare MNN Android library directory
         shell: bash
@@ -143,9 +193,7 @@ jobs:
             app/src/main/jniLibs/arm64-v8a
 
       # ============================================================
-      # 8. CACHE COMPILED MNN
-      #
-      # This is the important part.
+      # 9. CACHE COMPILED MNN
       #
       # First build:
       #   MNN compiles normally.
@@ -153,7 +201,8 @@ jobs:
       # Later builds:
       #   libMNN.so is restored from GitHub cache.
       #
-      # If MNN build settings change, change v1 -> v2.
+      # If MNN build settings change:
+      #   change v1 -> v2
       # ============================================================
       - name: Restore MNN native cache
         id: mnn-cache
@@ -164,7 +213,7 @@ jobs:
           key: sana-mnn-arm64-opencl-ndk27-v1
 
       # ============================================================
-      # 9. Build MNN ONLY when cache misses
+      # 10. Build MNN ONLY when cache misses
       # ============================================================
       - name: Build MNN Android
         if: steps.mnn-cache.outputs.cache-hit != 'true'
@@ -202,7 +251,7 @@ jobs:
             --parallel 2
 
       # ============================================================
-      # 10. Locate and install libMNN.so
+      # 11. Locate and install libMNN.so
       # ============================================================
       - name: Install MNN shared library
         shell: bash
@@ -212,11 +261,19 @@ jobs:
           DEST="app/src/main/jniLibs/arm64-v8a/libMNN.so"
 
           if [ -f "$DEST" ]; then
-            echo "MNN cache hit."
-            echo "Using cached:"
+            echo "======================================"
+            echo "MNN CACHE HIT"
+            echo "======================================"
+
+            echo "Using cached libMNN.so:"
             ls -lh "$DEST"
+
             exit 0
           fi
+
+          echo "======================================"
+          echo "MNN CACHE MISS"
+          echo "======================================"
 
           echo "Searching for compiled libMNN.so..."
 
@@ -230,6 +287,7 @@ jobs:
             echo "ERROR: libMNN.so was not found."
             echo ""
             echo "Available MNN libraries:"
+
             find third_party/MNN \
               -type f \
               \( \
@@ -254,7 +312,7 @@ jobs:
           ls -lh "$DEST"
 
       # ============================================================
-      # 11. Verify MNN
+      # 12. Verify MNN integration
       # ============================================================
       - name: Verify MNN integration files
         shell: bash
@@ -279,8 +337,15 @@ jobs:
           echo "MNN source:"
           du -sh third_party/MNN/source
 
+          echo ""
+          echo "MNN headers:"
+          test -f \
+            third_party/MNN/include/MNN/Interpreter.hpp
+
+          echo "MNN integration files verified."
+
       # ============================================================
-      # 12. Install Gradle 8.9
+      # 13. Install Gradle 8.9
       # ============================================================
       - name: Install Gradle 8.9
         shell: bash
@@ -298,7 +363,7 @@ jobs:
           echo "$HOME/gradle-8.9/bin" >> "$GITHUB_PATH"
 
       # ============================================================
-      # 13. Verify Gradle
+      # 14. Verify Gradle
       # ============================================================
       - name: Verify Gradle
         shell: bash
@@ -310,7 +375,7 @@ jobs:
           gradle --version
 
       # ============================================================
-      # 14. Build APK
+      # 15. Build APK
       # ============================================================
       - name: Build Debug APK
         shell: bash
@@ -323,7 +388,7 @@ jobs:
             --stacktrace
 
       # ============================================================
-      # 15. Verify APK
+      # 16. Verify APK
       # ============================================================
       - name: Verify APK
         shell: bash
@@ -341,7 +406,7 @@ jobs:
           ls -lh "$APK"
 
       # ============================================================
-      # 16. Upload APK
+      # 17. Upload APK
       # ============================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
