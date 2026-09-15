@@ -5,121 +5,100 @@ project(sana_native LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-message(STATUS "======================================")
-message(STATUS "SANA NATIVE BUILD")
-message(STATUS "======================================")
-message(STATUS "ANDROID ABI: ${ANDROID_ABI}")
-
 # ============================================================
-# Find Sana-Android project root
-#
-# Current file:
-# app/src/main/cpp/CMakeLists.txt
-#
-# Project root:
-# Sana-Android/
+# PROJECT PATHS
 # ============================================================
 
 get_filename_component(
-    PROJECT_ROOT
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../"
+    APP_CPP_DIR
+    "${CMAKE_CURRENT_LIST_DIR}"
     ABSOLUTE
 )
 
-set(MNN_ROOT
+get_filename_component(
+    APP_DIR
+    "${APP_CPP_DIR}/../.."
+    ABSOLUTE
+)
+
+get_filename_component(
+    PROJECT_ROOT
+    "${APP_DIR}/../.."
+    ABSOLUTE
+)
+
+set(
+    MNN_ROOT
     "${PROJECT_ROOT}/third_party/MNN"
 )
 
-message(STATUS "PROJECT ROOT: ${PROJECT_ROOT}")
-message(STATUS "MNN ROOT: ${MNN_ROOT}")
-
-# ============================================================
-# MNN HEADER DIRECTORY
-#
-# IMPORTANT:
-#
-# MNN/Interpreter.hpp is expected at:
-#
-# third_party/MNN/include/MNN/Interpreter.hpp
-#
-# NOT:
-#
-# third_party/MNN/source/MNN/Interpreter.hpp
-# ============================================================
-
-set(MNN_INCLUDE_DIR
+set(
+    MNN_INCLUDE_DIR
     "${MNN_ROOT}/include"
 )
 
-message(STATUS "MNN INCLUDE DIR: ${MNN_INCLUDE_DIR}")
-
-# ============================================================
-# Verify MNN headers
-# ============================================================
-
-if(NOT EXISTS
+set(
+    MNN_HEADER
     "${MNN_INCLUDE_DIR}/MNN/Interpreter.hpp"
 )
 
+set(
+    MNN_LIB
+    "${PROJECT_ROOT}/app/src/main/jniLibs/${ANDROID_ABI}/libMNN.so"
+)
+
+message(STATUS "======================================")
+message(STATUS "SANA / MNN CONFIGURATION")
+message(STATUS "======================================")
+
+message(STATUS "APP_CPP_DIR:")
+message(STATUS "${APP_CPP_DIR}")
+
+message(STATUS "PROJECT_ROOT:")
+message(STATUS "${PROJECT_ROOT}")
+
+message(STATUS "MNN_ROOT:")
+message(STATUS "${MNN_ROOT}")
+
+message(STATUS "MNN_INCLUDE_DIR:")
+message(STATUS "${MNN_INCLUDE_DIR}")
+
+message(STATUS "MNN_HEADER:")
+message(STATUS "${MNN_HEADER}")
+
+message(STATUS "MNN_LIB:")
+message(STATUS "${MNN_LIB}")
+
+# ============================================================
+# VERIFY HEADER
+# ============================================================
+
+if(NOT EXISTS "${MNN_HEADER}")
+
     message(FATAL_ERROR
-        "\n"
-        "======================================\n"
-        "MNN HEADER ERROR\n"
-        "======================================\n"
-        "Expected header:\n"
-        "${MNN_INCLUDE_DIR}/MNN/Interpreter.hpp\n"
-        "\n"
-        "MNN root:\n"
-        "${MNN_ROOT}\n"
-        "\n"
-        "Please verify the MNN checkout.\n"
-        "======================================\n"
+        "MNN HEADER NOT FOUND:\n${MNN_HEADER}"
     )
 
 endif()
 
-message(STATUS
-    "MNN Interpreter.hpp FOUND:"
-)
-
-message(STATUS
-    "${MNN_INCLUDE_DIR}/MNN/Interpreter.hpp"
-)
+message(STATUS "MNN HEADER FOUND")
 
 # ============================================================
-# MNN shared library
-#
-# Workflow installs:
-#
-# app/src/main/jniLibs/arm64-v8a/libMNN.so
+# VERIFY LIBRARY
 # ============================================================
-
-set(MNN_LIB
-    "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libMNN.so"
-)
-
-message(STATUS "MNN LIBRARY: ${MNN_LIB}")
 
 if(NOT EXISTS "${MNN_LIB}")
 
     message(FATAL_ERROR
-        "\n"
-        "======================================\n"
-        "MNN LIBRARY ERROR\n"
-        "======================================\n"
-        "Expected:\n"
-        "${MNN_LIB}\n"
-        "\n"
-        "libMNN.so was not found.\n"
-        "======================================\n"
+        "MNN LIBRARY NOT FOUND:\n${MNN_LIB}"
     )
 
 endif()
 
-message(STATUS "libMNN.so FOUND")
+message(STATUS "MNN LIBRARY FOUND")
 
 # ============================================================
-# Imported MNN shared library
+# IMPORT MNN
 # ============================================================
 
 add_library(
@@ -131,40 +110,32 @@ add_library(
 set_target_properties(
     MNN
     PROPERTIES
-
     IMPORTED_LOCATION
         "${MNN_LIB}"
-
-    INTERFACE_INCLUDE_DIRECTORIES
-        "${MNN_INCLUDE_DIR}"
 )
 
 # ============================================================
-# Sana native JNI library
+# SANA JNI
 # ============================================================
 
 add_library(
     sana_native
     SHARED
-
     sana_jni.cpp
 )
 
 # ============================================================
-# MNN include path
-#
-# This is the critical fix.
+# CRITICAL INCLUDE PATH
 # ============================================================
 
 target_include_directories(
     sana_native
     PRIVATE
-
-    "${MNN_INCLUDE_DIR}"
+        "${MNN_INCLUDE_DIR}"
 )
 
 # ============================================================
-# Android libraries
+# ANDROID LIBRARIES
 # ============================================================
 
 find_library(
@@ -178,42 +149,16 @@ find_library(
 )
 
 # ============================================================
-# Link Sana native library
+# LINK
 # ============================================================
 
 target_link_libraries(
     sana_native
-
     MNN
-
     ${log-lib}
-
     ${android-lib}
 )
 
-# ============================================================
-# Final diagnostics
-# ============================================================
-
 message(STATUS "======================================")
-message(STATUS "SANA NATIVE CONFIGURATION COMPLETE")
+message(STATUS "MNN CONFIGURATION COMPLETE")
 message(STATUS "======================================")
-
-message(STATUS
-    "MNN include:"
-)
-
-message(STATUS
-    "${MNN_INCLUDE_DIR}"
-)
-
-message(STATUS
-    "MNN library:"
-)
-
-message(STATUS
-    "${MNN_LIB}"
-)
-
-message(STATUS
-    "======================================")
