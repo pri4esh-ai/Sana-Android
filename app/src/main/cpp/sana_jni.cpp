@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -18,37 +19,31 @@
 #include <sys/stat.h>
 
 
+// ============================================================
+// Logging
+// ============================================================
+
 #define LOG_TAG "SanaNative"
 
 #define LOGI(...) \
-    __android_log_print(
-        ANDROID_LOG_INFO,
-        LOG_TAG,
-        __VA_ARGS__
-    )
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 #define LOGE(...) \
-    __android_log_print(
-        ANDROID_LOG_ERROR,
-        LOG_TAG,
-        __VA_ARGS__
-    )
+    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 
-/* ============================================================
- * Utility
- * ============================================================ */
+// ============================================================
+// Utility
+// ============================================================
 
 static std::string shapeString(
         const std::vector<int>& shape
 ) {
-
     std::ostringstream ss;
 
     ss << "[";
 
     for (size_t i = 0; i < shape.size(); ++i) {
-
         if (i > 0) {
             ss << ", ";
         }
@@ -62,9 +57,9 @@ static std::string shapeString(
 }
 
 
-/* ============================================================
- * Persistent Sana Engine
- * ============================================================ */
+// ============================================================
+// Persistent Sana Engine
+// ============================================================
 
 class SanaEngine {
 
@@ -74,7 +69,6 @@ public:
 
 
     ~SanaEngine() {
-
         release();
     }
 
@@ -88,7 +82,6 @@ public:
 
         std::lock_guard<std::mutex> lock(mMutex);
 
-
         releaseLocked();
 
 
@@ -100,8 +93,8 @@ public:
         ) != 0) {
 
             mStatus =
-                    "Model file does not exist:\n"
-                    + modelPath;
+                    "Model file does not exist:\n" +
+                    modelPath;
 
             return false;
         }
@@ -136,9 +129,8 @@ public:
 
             config.mode =
                     MNN_GPU_TUNING_FAST;
-        }
 
-        else {
+        } else {
 
             config.type =
                     MNN_FORWARD_CPU;
@@ -175,9 +167,8 @@ public:
 
             mBackend =
                     "OpenCL / FP16";
-        }
 
-        else {
+        } else {
 
             mBackend =
                     "CPU";
@@ -275,9 +266,9 @@ private:
 static SanaEngine gEngine;
 
 
-/* ============================================================
- * Input preparation
- * ============================================================ */
+// ============================================================
+// Input preparation
+// ============================================================
 
 static bool prepareInput(
         MNN::Interpreter* interpreter,
@@ -285,6 +276,10 @@ static bool prepareInput(
         MNN::Tensor* input,
         const std::string& inputName
 ) {
+
+    (void) interpreter;
+    (void) session;
+
 
     if (!input) {
 
@@ -340,12 +335,13 @@ static bool prepareInput(
     );
 
 
-    /*
-     * Transformer timestep.
-     *
-     * The actual Sana pipeline will later
-     * provide the real scheduler timestep.
-     */
+    // --------------------------------------------------------
+    // Transformer timestep
+    //
+    // This is only a diagnostic value.
+    // The real Sana pipeline will provide the scheduler
+    // timestep during actual generation.
+    // --------------------------------------------------------
 
     if (inputName == "timestep") {
 
@@ -366,9 +362,9 @@ static bool prepareInput(
 }
 
 
-/* ============================================================
- * Generic single-model diagnostic
- * ============================================================ */
+// ============================================================
+// Generic single-model diagnostic
+// ============================================================
 
 static std::string testSingleModel(
         const std::string& modelName,
@@ -377,17 +373,21 @@ static std::string testSingleModel(
         bool preferOpenCl
 ) {
 
+    (void) cachePath;
+
+
     std::ostringstream result;
 
 
-    result << modelName
-           << "\n"
-           << "===\n";
+    result
+            << modelName
+            << "\n"
+            << "===\n";
 
 
-    /* --------------------------------------------------------
-     * Check file
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Check model file
+    // --------------------------------------------------------
 
     struct stat fileInfo {};
 
@@ -418,9 +418,9 @@ static std::string testSingleModel(
             << " bytes\n\n";
 
 
-    /* --------------------------------------------------------
-     * Create interpreter
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Create interpreter
+    // --------------------------------------------------------
 
     std::shared_ptr<MNN::Interpreter>
             interpreter(
@@ -443,9 +443,9 @@ static std::string testSingleModel(
             << "Interpreter created.\n\n";
 
 
-    /* --------------------------------------------------------
-     * Session configuration
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Session configuration
+    // --------------------------------------------------------
 
     MNN::ScheduleConfig config{};
 
@@ -460,9 +460,8 @@ static std::string testSingleModel(
 
         config.mode =
                 MNN_GPU_TUNING_FAST;
-    }
 
-    else {
+    } else {
 
         config.type =
                 MNN_FORWARD_CPU;
@@ -478,9 +477,9 @@ static std::string testSingleModel(
     MNN::BackendConfig backendConfig{};
 
 
-    /*
-     * Low precision / FP16.
-     */
+    // --------------------------------------------------------
+    // Use low precision / FP16 where supported.
+    // --------------------------------------------------------
 
     backendConfig.precision =
             MNN::BackendConfig::Precision_Low;
@@ -509,27 +508,26 @@ static std::string testSingleModel(
 
         result
                 << "Backend: OpenCL / FP16\n\n";
-    }
 
-    else {
+    } else {
 
         result
                 << "Backend: CPU\n\n";
     }
 
 
-    /* --------------------------------------------------------
-     * Resize session
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Resize session
+    // --------------------------------------------------------
 
     interpreter->resizeSession(
             session
     );
 
 
-    /* --------------------------------------------------------
-     * Get inputs
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Get inputs
+    // --------------------------------------------------------
 
     std::map<std::string, MNN::Tensor*> inputs =
             interpreter->getSessionInputAll(
@@ -550,14 +548,14 @@ static std::string testSingleModel(
         );
 
         return
-                result.str()
-                + "FAIL: No inputs found.";
+                result.str() +
+                "FAIL: No inputs found.";
     }
 
 
-    /* --------------------------------------------------------
-     * Print inputs
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Print inputs
+    // --------------------------------------------------------
 
     for (const auto& pair : inputs) {
 
@@ -594,9 +592,9 @@ static std::string testSingleModel(
     }
 
 
-    /* --------------------------------------------------------
-     * Prepare inputs
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Prepare inputs
+    // --------------------------------------------------------
 
     for (const auto& pair : inputs) {
 
@@ -613,15 +611,15 @@ static std::string testSingleModel(
 
 
             return
-                    result.str()
-                    + "\nFAIL: Input preparation failed.";
+                    result.str() +
+                    "\nFAIL: Input preparation failed.";
         }
     }
 
 
-    /* --------------------------------------------------------
-     * Run inference
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Run inference
+    // --------------------------------------------------------
 
     result
             << "\nRunning inference...\n";
@@ -675,9 +673,9 @@ static std::string testSingleModel(
     }
 
 
-    /* --------------------------------------------------------
-     * Outputs
-     * -------------------------------------------------------- */
+    // --------------------------------------------------------
+    // Outputs
+    // --------------------------------------------------------
 
     std::map<std::string, MNN::Tensor*> outputs =
             interpreter->getSessionOutputAll(
@@ -726,6 +724,10 @@ static std::string testSingleModel(
     }
 
 
+    // --------------------------------------------------------
+    // Release session
+    // --------------------------------------------------------
+
     interpreter->releaseSession(
             session
     );
@@ -741,13 +743,13 @@ static std::string testSingleModel(
 }
 
 
-/* ============================================================
- * Transformer-only diagnostic
- *
- * IMPORTANT:
- * This is the working Transformer test.
- * Do not load VAE here.
- * ============================================================ */
+// ============================================================
+// Transformer-only diagnostic
+//
+// IMPORTANT:
+// - Loads ONLY the Transformer.
+// - Does NOT load VAE.
+// ============================================================
 
 static std::string testTransformerOnly(
         const std::string& transformerPath,
@@ -764,9 +766,9 @@ static std::string testTransformerOnly(
 }
 
 
-/* ============================================================
- * Combined Transformer + VAE diagnostic
- * ============================================================ */
+// ============================================================
+// Combined Transformer + VAE diagnostic
+// ============================================================
 
 static std::string testModels(
         const std::string& transformerPath,
@@ -782,6 +784,10 @@ static std::string testModels(
             << "SANA MODEL TEST\n"
             << "================\n\n";
 
+
+    // --------------------------------------------------------
+    // Transformer
+    // --------------------------------------------------------
 
     result
             << "TRANSFORMER TEST\n"
@@ -801,6 +807,10 @@ static std::string testModels(
             << "\n\n";
 
 
+    // --------------------------------------------------------
+    // VAE
+    // --------------------------------------------------------
+
     result
             << "VAE TEST\n"
             << "--------\n";
@@ -819,9 +829,9 @@ static std::string testModels(
 }
 
 
-/* ============================================================
- * JNI: nativeInitialize
- * ============================================================ */
+// ============================================================
+// JNI: nativeInitialize
+// ============================================================
 
 extern "C"
 JNIEXPORT jboolean JNICALL
@@ -834,6 +844,9 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
         jboolean preferOpenCl,
         jint cpuThreads
 ) {
+
+    (void) assetManager;
+
 
     try {
 
@@ -910,9 +923,9 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
 }
 
 
-/* ============================================================
- * JNI: nativeIsInitialized
- * ============================================================ */
+// ============================================================
+// JNI: nativeIsInitialized
+// ============================================================
 
 extern "C"
 JNIEXPORT jboolean JNICALL
@@ -927,9 +940,9 @@ Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
 }
 
 
-/* ============================================================
- * JNI: nativeGetBackend
- * ============================================================ */
+// ============================================================
+// JNI: nativeGetBackend
+// ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -948,9 +961,9 @@ Java_com_sana_android_engine_NativeSana_nativeGetBackend(
 }
 
 
-/* ============================================================
- * JNI: nativeGetStatus
- * ============================================================ */
+// ============================================================
+// JNI: nativeGetStatus
+// ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -969,9 +982,9 @@ Java_com_sana_android_engine_NativeSana_nativeGetStatus(
 }
 
 
-/* ============================================================
- * JNI: nativeRelease
- * ============================================================ */
+// ============================================================
+// JNI: nativeRelease
+// ============================================================
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -984,15 +997,15 @@ Java_com_sana_android_engine_NativeSana_nativeRelease(
 }
 
 
-/* ============================================================
- * JNI: nativeTestTransformer
- *
- * Transformer-only diagnostic.
- *
- * IMPORTANT:
- * - Loads ONLY sana_transformer.mnn
- * - Does NOT load VAE
- * ============================================================ */
+// ============================================================
+// JNI: nativeTestTransformer
+//
+// Transformer-only diagnostic.
+//
+// IMPORTANT:
+// - Loads ONLY sana_transformer.mnn.
+// - Does NOT load VAE.
+// ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -1099,17 +1112,16 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
 }
 
 
-/* ============================================================
- * JNI: nativeTestVae
- *
- * VAE-ONLY diagnostic.
- *
- * IMPORTANT:
- * - Loads ONLY sana_vae_decoder.mnn
- * - Does NOT load Transformer
- * - Does NOT create Transformer session
- * - Uses the existing testSingleModel() diagnostic
- * ============================================================ */
+// ============================================================
+// JNI: nativeTestVae
+//
+// VAE-only diagnostic.
+//
+// IMPORTANT:
+// - Loads ONLY sana_vae_decoder.mnn.
+// - Does NOT load Transformer.
+// - Does NOT create a Transformer session.
+// ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -1182,14 +1194,9 @@ Java_com_sana_android_engine_NativeSana_nativeTestVae(
         }
 
 
-        /*
-         * IMPORTANT:
-         *
-         * Only the VAE is tested here.
-         *
-         * testSingleModel() creates a completely
-         * separate MNN interpreter and session.
-         */
+        // ----------------------------------------------------
+        // Test ONLY the VAE.
+        // ----------------------------------------------------
 
         const std::string output =
                 testSingleModel(
@@ -1226,12 +1233,12 @@ Java_com_sana_android_engine_NativeSana_nativeTestVae(
 }
 
 
-/* ============================================================
- * JNI: nativeTestModels
- *
- * Legacy combined diagnostic.
- * Kept for compatibility with existing Kotlin code.
- * ============================================================ */
+// ============================================================
+// JNI: nativeTestModels
+//
+// Legacy combined diagnostic.
+// Kept for compatibility with existing Kotlin code.
+// ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
