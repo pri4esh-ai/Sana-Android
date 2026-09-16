@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -46,36 +45,62 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    SanaTestScreen(context = this@MainActivity)
+                Surface(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    SanaTransformerTestScreen(
+                        context = this@MainActivity
+                    )
                 }
             }
         }
     }
 
     override fun onDestroy() {
-        NativeSana.release()
+        try {
+            NativeSana.release()
+        } catch (_: Throwable) {
+        }
+
         super.onDestroy()
     }
 }
 
 @Composable
-private fun SanaTestScreen(context: Context) {
+private fun SanaTransformerTestScreen(
+    context: Context
+) {
+    var transformerUri by remember {
+        mutableStateOf<Uri?>(null)
+    }
 
-    var transformerUri by remember { mutableStateOf<Uri?>(null) }
-    var vaeUri by remember { mutableStateOf<Uri?>(null) }
+    var transformerName by remember {
+        mutableStateOf("No Transformer selected")
+    }
 
-    var transformerName by remember { mutableStateOf("No Transformer selected") }
-    var vaeName by remember { mutableStateOf("No VAE selected") }
+    var status by remember {
+        mutableStateOf("Ready")
+    }
 
-    var status by remember { mutableStateOf("Ready") }
-    var result by remember { mutableStateOf("") }
+    var result by remember {
+        mutableStateOf("")
+    }
 
-    var testing by remember { mutableStateOf(false) }
-    var copying by remember { mutableStateOf(false) }
+    var testing by remember {
+        mutableStateOf(false)
+    }
 
-    val executor = remember { Executors.newSingleThreadExecutor() }
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    var copying by remember {
+        mutableStateOf(false)
+    }
+
+    val executor = remember {
+        Executors.newSingleThreadExecutor()
+    }
+
+    val mainHandler = remember {
+        Handler(Looper.getMainLooper())
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -87,34 +112,32 @@ private fun SanaTestScreen(context: Context) {
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenDocument()
         ) { uri ->
-            if (uri != null) {
-                transformerUri = uri
-                transformerName =
-                    uri.lastPathSegment?.substringAfterLast("/")
-                        ?: "Transformer selected"
-                status = "Transformer selected"
-            }
-        }
 
-    val vaePicker =
-        rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.OpenDocument()
-        ) { uri ->
             if (uri != null) {
-                vaeUri = uri
-                vaeName =
-                    uri.lastPathSegment?.substringAfterLast("/")
-                        ?: "VAE selected"
-                status = "VAE selected"
+
+                transformerUri = uri
+
+                transformerName =
+                    uri.lastPathSegment
+                        ?.substringAfterLast("/")
+                        ?: "Transformer selected"
+
+                status = "Transformer selected"
+
+                result = ""
             }
         }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(
+                rememberScrollState()
+            )
             .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+
+        verticalArrangement =
+            Arrangement.spacedBy(12.dp)
     ) {
 
         Text(
@@ -124,20 +147,32 @@ private fun SanaTestScreen(context: Context) {
         )
 
         Text(
-            text = "Sana 0.6B • 512×512 • MNN • ARM64",
+            text = "Sana 0.6B • 512×512 • Transformer Diagnostic",
             style = MaterialTheme.typography.bodyMedium
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = "MNN • ARM64 • OpenCL / FP16",
+            style = MaterialTheme.typography.bodySmall
+        )
 
-        Card(modifier = Modifier.fillMaxWidth()) {
+        Spacer(
+            modifier = Modifier.height(8.dp)
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+
             Column(
                 modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+
+                verticalArrangement =
+                    Arrangement.spacedBy(8.dp)
             ) {
 
                 Text(
-                    text = "1. Transformer model",
+                    text = "Transformer model",
                     fontWeight = FontWeight.Bold
                 )
 
@@ -147,7 +182,12 @@ private fun SanaTestScreen(context: Context) {
                 )
 
                 OutlinedButton(
+                    enabled =
+                        !testing &&
+                        !copying,
+
                     onClick = {
+
                         transformerPicker.launch(
                             arrayOf(
                                 "application/octet-stream",
@@ -156,117 +196,112 @@ private fun SanaTestScreen(context: Context) {
                             )
                         )
                     },
+
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Select sana_transformer.mnn")
+
+                    Text(
+                        text = "SELECT TRANSFORMER"
+                    )
                 }
             }
         }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-
-                Text(
-                    text = "2. VAE decoder",
-                    fontWeight = FontWeight.Bold
-                )
-
-                Text(
-                    text = vaeName,
-                    style = MaterialTheme.typography.bodySmall
-                )
-
-                OutlinedButton(
-                    onClick = {
-                        vaePicker.launch(
-                            arrayOf(
-                                "application/octet-stream",
-                                "application/*",
-                                "*/*"
-                            )
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Select sana_vae_decoder.mnn")
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(4.dp))
 
         Button(
-            enabled = transformerUri != null &&
-                    vaeUri != null &&
-                    !testing &&
-                    !copying,
+            enabled =
+                transformerUri != null &&
+                !testing &&
+                !copying,
+
             onClick = {
 
-                val transformer = transformerUri
-                val vae = vaeUri
-
-                if (transformer == null || vae == null) {
-                    status = "Select both models first"
-                    return@Button
-                }
+                val selectedUri =
+                    transformerUri
+                        ?: return@Button
 
                 testing = true
                 copying = true
+
                 result = ""
-                status = "Copying models..."
+
+                status =
+                    "Copying Transformer..."
 
                 executor.execute {
 
                     try {
 
-                        val modelDir =
-                            File(context.filesDir, "sana_models")
+                        val modelDirectory =
+                            File(
+                                context.filesDir,
+                                "sana_models"
+                            )
 
-                        if (!modelDir.exists()) {
-                            modelDir.mkdirs()
+                        if (
+                            !modelDirectory.exists() &&
+                            !modelDirectory.mkdirs()
+                        ) {
+
+                            throw IllegalStateException(
+                                "Unable to create model directory"
+                            )
                         }
 
                         val transformerFile =
-                            File(modelDir, "sana_transformer.mnn")
-
-                        val vaeFile =
-                            File(modelDir, "sana_vae_decoder.mnn")
+                            File(
+                                modelDirectory,
+                                "sana_transformer.mnn"
+                            )
 
                         copyUriToFile(
                             context = context,
-                            uri = transformer,
+                            uri = selectedUri,
                             destination = transformerFile
                         )
 
-                        mainHandler.post {
-                            status = "Transformer copied"
+                        val fileSize =
+                            transformerFile.length()
+
+                        if (fileSize <= 0L) {
+
+                            throw IllegalStateException(
+                                "Copied Transformer is empty"
+                            )
                         }
 
-                        copyUriToFile(
-                            context = context,
-                            uri = vae,
-                            destination = vaeFile
-                        )
-
                         mainHandler.post {
+
                             copying = false
-                            status = "Models copied. Testing MNN..."
+
+                            status =
+                                "Transformer copied. Starting native test..."
                         }
+
+                        /*
+                         * IMPORTANT:
+                         *
+                         * This calls the NEW transformer-only JNI API.
+                         *
+                         * VAE is NOT passed.
+                         * VAE is NOT copied.
+                         * VAE is NOT loaded.
+                         */
 
                         val output =
-                            NativeSana.testModels(
+                            NativeSana.testTransformer(
                                 context = context,
-                                transformerFile = transformerFile,
-                                vaeFile = vaeFile,
+                                transformerFile =
+                                    transformerFile,
                                 preferOpenCl = true
                             )
 
                         mainHandler.post {
+
                             result = output
-                            status = "Test finished"
+
+                            status =
+                                "Transformer test finished"
+
                             testing = false
                         }
 
@@ -274,46 +309,76 @@ private fun SanaTestScreen(context: Context) {
 
                         val message =
                             buildString {
-                                append(t::class.java.simpleName)
+
+                                append(
+                                    t::class.java.simpleName
+                                )
+
                                 append(": ")
-                                append(t.message ?: "Unknown error")
+
+                                append(
+                                    t.message
+                                        ?: "Unknown error"
+                                )
                             }
 
                         mainHandler.post {
+
                             copying = false
+
                             testing = false
-                            status = "Test failed"
-                            result = message
+
+                            status =
+                                "Test failed"
+
+                            result =
+                                message
                         }
                     }
                 }
             },
-            modifier = Modifier.fillMaxWidth()
+
+            modifier =
+                Modifier.fillMaxWidth()
         ) {
 
             if (testing) {
 
                 CircularProgressIndicator(
                     modifier = Modifier
-                        .width(22.dp)
                         .height(22.dp)
                 )
 
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(
+                    modifier =
+                        Modifier.height(4.dp)
+                )
 
-                Text("Testing...")
+                Text(
+                    text =
+                        "Testing Transformer..."
+                )
 
             } else {
 
-                Text("Test Sana Models")
+                Text(
+                    text =
+                        "TEST TRANSFORMER"
+                )
             }
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier =
+                Modifier.fillMaxWidth()
+        ) {
 
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                modifier =
+                    Modifier.padding(16.dp),
+
+                verticalArrangement =
+                    Arrangement.spacedBy(8.dp)
             ) {
 
                 Text(
@@ -321,28 +386,66 @@ private fun SanaTestScreen(context: Context) {
                     fontWeight = FontWeight.Bold
                 )
 
-                Text(text = status)
+                Text(
+                    text = status
+                )
 
                 if (result.isNotBlank()) {
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(
+                        modifier =
+                            Modifier.height(4.dp)
+                    )
 
                     Text(
                         text = "Result",
-                        fontWeight = FontWeight.Bold
+                        fontWeight =
+                            FontWeight.Bold
                     )
 
-                    Text(text = result)
+                    Text(
+                        text = result
+                    )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Card(
+            modifier =
+                Modifier.fillMaxWidth()
+        ) {
 
-        Text(
-            text = "This test loads the 1.5 GB Sana package from internal storage. The APK does not contain the models.",
-            style = MaterialTheme.typography.bodySmall
-        )
+            Column(
+                modifier =
+                    Modifier.padding(16.dp),
+
+                verticalArrangement =
+                    Arrangement.spacedBy(6.dp)
+            ) {
+
+                Text(
+                    text =
+                        "Diagnostic mode",
+                    fontWeight =
+                        FontWeight.Bold
+                )
+
+                Text(
+                    text =
+                        "Only sana_transformer.mnn is tested."
+                )
+
+                Text(
+                    text =
+                        "The VAE is completely excluded from this test."
+                )
+
+                Text(
+                    text =
+                        "After the Transformer passes, we will diagnose the VAE separately."
+                )
+            }
+        }
     }
 }
 
@@ -356,21 +459,33 @@ private fun copyUriToFile(
         .openInputStream(uri)
         ?.use { input ->
 
-            destination.outputStream().use { output ->
+            destination.outputStream()
+                .use { output ->
 
-                val buffer = ByteArray(1024 * 1024)
+                    val buffer =
+                        ByteArray(1024 * 1024)
 
-                while (true) {
+                    while (true) {
 
-                    val read = input.read(buffer)
+                        val read =
+                            input.read(buffer)
 
-                    if (read <= 0) break
+                        if (read <= 0) {
+                            break
+                        }
 
-                    output.write(buffer, 0, read)
+                        output.write(
+                            buffer,
+                            0,
+                            read
+                        )
+                    }
+
+                    output.flush()
                 }
 
-                output.flush()
-            }
         }
-        ?: throw IllegalStateException("Unable to open selected model")
+        ?: throw IllegalStateException(
+            "Unable to open selected Transformer"
+        )
 }
