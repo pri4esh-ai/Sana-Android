@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
-#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -24,19 +23,23 @@ namespace {
 
 std::mutex gMutex;
 
-std::shared_ptr<MNN::Interpreter> gInterpreter;
-MNN::Session* gSession = nullptr;
-
 bool gInitialized = false;
 std::string gBackend = "Not initialized";
 std::string gStatus = "Not initialized";
 
-static std::string jstringToString(JNIEnv* env, jstring value) {
+static std::string jstringToString(
+    JNIEnv* env,
+    jstring value
+) {
     if (value == nullptr) {
         return "";
     }
 
-    const char* chars = env->GetStringUTFChars(value, nullptr);
+    const char* chars =
+        env->GetStringUTFChars(
+            value,
+            nullptr
+        );
 
     if (chars == nullptr) {
         return "";
@@ -44,7 +47,10 @@ static std::string jstringToString(JNIEnv* env, jstring value) {
 
     std::string result(chars);
 
-    env->ReleaseStringUTFChars(value, chars);
+    env->ReleaseStringUTFChars(
+        value,
+        chars
+    );
 
     return result;
 }
@@ -70,58 +76,12 @@ static std::string shapeToString(
     return out.str();
 }
 
-static std::string backendName(
-    MNNForwardType backend
-) {
-    switch (backend) {
-
-        case MNN_FORWARD_OPENCL:
-            return "OpenCL / FP16";
-
-        case MNN_FORWARD_CPU:
-            return "CPU";
-
-        case MNN_FORWARD_OPENGL:
-            return "OpenGL";
-
-        case MNN_FORWARD_VULKAN:
-            return "Vulkan";
-
-        default:
-            return "Unknown";
-    }
-}
-
-static std::string makeSessionStatus(
-    MNN::Interpreter* interpreter,
-    MNN::Session* session
-) {
-    if (interpreter == nullptr || session == nullptr) {
-        return "Invalid interpreter/session";
-    }
-
-    int resizeStatus = 0;
-
-    interpreter->getSessionInfo(
-        session,
-        MNN::Interpreter::RESIZE_STATUS,
-        &resizeStatus
-    );
-
-    std::ostringstream out;
-
-    out
-        << "Resize status: "
-        << resizeStatus;
-
-    return out.str();
-}
-
 /*
- * Existing engine API.
+ * Existing engine.
  *
- * This is kept intact so the diagnostic APK remains compatible
- * with NativeSana.kt.
+ * IMPORTANT:
+ * MNN::Interpreter::createFromFile()
+ * returns Interpreter*, not shared_ptr.
  */
 class SanaEngine {
 
@@ -139,6 +99,7 @@ public:
         bool preferOpenCl,
         int cpuThreads
     ) {
+        (void)cachePath;
 
         release();
 
@@ -152,7 +113,7 @@ public:
                 modelPath.c_str()
             );
 
-        if (!interpreter) {
+        if (interpreter == nullptr) {
 
             LOGE(
                 "Failed to create interpreter"
@@ -204,13 +165,17 @@ public:
                 config
             );
 
-        if (!session) {
+        if (session == nullptr) {
 
             LOGE(
                 "Failed to create Sana session"
             );
 
-            interpreter.reset();
+            MNN::Interpreter::destroy(
+                interpreter
+            );
+
+            interpreter = nullptr;
 
             return false;
         }
@@ -230,16 +195,23 @@ public:
 
     void release() {
 
-        if (interpreter && session) {
+        if (interpreter != nullptr) {
 
-            interpreter->releaseSession(
-                session
+            if (session != nullptr) {
+
+                interpreter->releaseSession(
+                    session
+                );
+
+                session = nullptr;
+            }
+
+            MNN::Interpreter::destroy(
+                interpreter
             );
+
+            interpreter = nullptr;
         }
-
-        session = nullptr;
-
-        interpreter.reset();
 
         initialized = false;
 
@@ -264,13 +236,14 @@ public:
 
 private:
 
-    std::shared_ptr<MNN::Interpreter>
-        interpreter;
+    MNN::Interpreter* interpreter =
+        nullptr;
 
-    MNN::Session*
-        session = nullptr;
+    MNN::Session* session =
+        nullptr;
 
-    bool initialized = false;
+    bool initialized =
+        false;
 
     std::string backend =
         "Not initialized";
@@ -281,11 +254,11 @@ private:
 
 SanaEngine gEngine;
 
+
 /*
- * Common MNN interpreter configuration.
+ * MNN createFromFile() returns Interpreter*.
  */
-static std::shared_ptr<MNN::Interpreter>
-createInterpreter(
+static MNN::Interpreter* createInterpreter(
     const std::string& modelPath
 ) {
     LOGI(
@@ -293,12 +266,12 @@ createInterpreter(
         modelPath.c_str()
     );
 
-    auto interpreter =
+    MNN::Interpreter* interpreter =
         MNN::Interpreter::createFromFile(
             modelPath.c_str()
         );
 
-    if (!interpreter) {
+    if (interpreter == nullptr) {
 
         LOGE(
             "MNN interpreter creation failed"
@@ -308,52 +281,12 @@ createInterpreter(
     return interpreter;
 }
 
-/*
- * Create an OpenCL / FP16 session.
- *
- * This matches the configuration used by the
- * working Transformer diagnostic.
- */
-static MNN::Session* createOpenCLSession(
-    MNN::Interpreter* interpreter
-) {
-    if (interpreter == nullptr) {
-        return nullptr;
-    }
-
-    MNN::ScheduleConfig config{};
-
-    config.type =
-        MNN_FORWARD_OPENCL;
-
-    config.numThread =
-        4;
-
-    MNN::BackendConfig backendConfig{};
-
-    backendConfig.precision =
-        MNN::BackendConfig::Precision_Low;
-
-    backendConfig.memory =
-        MNN::BackendConfig::Memory_Normal;
-
-    backendConfig.power =
-        MNN::BackendConfig::Power_Normal;
-
-    config.backendConfig =
-        &backendConfig;
-
-    return interpreter->createSession(
-        config
-    );
-}
 
 /*
  * Transformer diagnostic.
  *
- * IMPORTANT:
- * This path intentionally remains the same
- * diagnostic behavior that already passed.
+ * Keep this path compatible with the already
+ * successful Transformer test.
  */
 static std::string testTransformerInternal(
     const std::string& transformerPath,
@@ -404,12 +337,12 @@ static std::string testTransformerInternal(
         << size
         << " bytes\n\n";
 
-    auto interpreter =
+    MNN::Interpreter* interpreter =
         createInterpreter(
             transformerPath
         );
 
-    if (!interpreter) {
+    if (interpreter == nullptr) {
 
         result
             << "FAIL: Transformer interpreter creation failed.";
@@ -422,16 +355,10 @@ static std::string testTransformerInternal(
 
     MNN::ScheduleConfig config{};
 
-    if (preferOpenCl) {
-
-        config.type =
-            MNN_FORWARD_OPENCL;
-
-    } else {
-
-        config.type =
-            MNN_FORWARD_CPU;
-    }
+    config.type =
+        preferOpenCl
+            ? MNN_FORWARD_OPENCL
+            : MNN_FORWARD_CPU;
 
     config.numThread =
         4;
@@ -455,10 +382,14 @@ static std::string testTransformerInternal(
             config
         );
 
-    if (!session) {
+    if (session == nullptr) {
 
         result
             << "FAIL: Could not create Transformer session.";
+
+        MNN::Interpreter::destroy(
+            interpreter
+        );
 
         return result.str();
     }
@@ -493,19 +424,16 @@ static std::string testTransformerInternal(
 
     for (const auto& item : inputs) {
 
-        const std::string& name =
-            item.first;
-
         MNN::Tensor* tensor =
             item.second;
 
-        if (!tensor) {
+        if (tensor == nullptr) {
             continue;
         }
 
         result
             << "Input: "
-            << name
+            << item.first
             << "\n";
 
         result
@@ -521,10 +449,6 @@ static std::string testTransformerInternal(
             << "\n\n";
     }
 
-    /*
-     * Transformer input names expected from the
-     * exported Sana model.
-     */
     MNN::Tensor* encoderHiddenStates =
         interpreter->getSessionInput(
             session,
@@ -554,12 +478,13 @@ static std::string testTransformerInternal(
             session
         );
 
+        MNN::Interpreter::destroy(
+            interpreter
+        );
+
         return result.str();
     }
 
-    /*
-     * Use the model's existing input shapes.
-     */
     interpreter->resizeTensor(
         encoderHiddenStates,
         {1, 256, 2304}
@@ -579,9 +504,6 @@ static std::string testTransformerInternal(
         session
     );
 
-    /*
-     * Re-acquire tensors after resizeSession().
-     */
     encoderHiddenStates =
         interpreter->getSessionInput(
             session,
@@ -600,12 +522,6 @@ static std::string testTransformerInternal(
             "timestep"
         );
 
-    /*
-     * Host tensors.
-     *
-     * This is the same host->device mechanism
-     * used by MNN's own examples for device inputs.
-     */
     MNN::Tensor encoderHost(
         encoderHiddenStates,
         MNN::Tensor::CAFFE
@@ -621,27 +537,6 @@ static std::string testTransformerInternal(
         MNN::Tensor::CAFFE
     );
 
-    std::memset(
-        encoderHost.host<void>(),
-        0,
-        encoderHost.size()
-    );
-
-    std::memset(
-        hiddenHost.host<void>(),
-        0,
-        hiddenHost.size()
-    );
-
-    std::memset(
-        timestepHost.host<void>(),
-        0,
-        timestepHost.size()
-    );
-
-    /*
-     * Fill deterministic test data.
-     */
     float* encoderData =
         encoderHost.host<float>();
 
@@ -651,14 +546,8 @@ static std::string testTransformerInternal(
     float* timestepData =
         timestepHost.host<float>();
 
-    const int encoderElements =
-        encoderHost.elementSize();
-
-    const int hiddenElements =
-        hiddenHost.elementSize();
-
     for (int i = 0;
-         i < encoderElements;
+         i < encoderHost.elementSize();
          ++i) {
 
         encoderData[i] =
@@ -669,7 +558,7 @@ static std::string testTransformerInternal(
     }
 
     for (int i = 0;
-         i < hiddenElements;
+         i < hiddenHost.elementSize();
          ++i) {
 
         hiddenData[i] =
@@ -692,6 +581,10 @@ static std::string testTransformerInternal(
             session
         );
 
+        MNN::Interpreter::destroy(
+            interpreter
+        );
+
         return result.str();
     }
 
@@ -705,6 +598,10 @@ static std::string testTransformerInternal(
             session
         );
 
+        MNN::Interpreter::destroy(
+            interpreter
+        );
+
         return result.str();
     }
 
@@ -716,6 +613,10 @@ static std::string testTransformerInternal(
 
         interpreter->releaseSession(
             session
+        );
+
+        MNN::Interpreter::destroy(
+            interpreter
         );
 
         return result.str();
@@ -757,6 +658,10 @@ static std::string testTransformerInternal(
 
         interpreter->releaseSession(
             session
+        );
+
+        MNN::Interpreter::destroy(
+            interpreter
         );
 
         return result.str();
@@ -806,29 +711,34 @@ static std::string testTransformerInternal(
         session
     );
 
+    MNN::Interpreter::destroy(
+        interpreter
+    );
+
     result
         << "Transformer released successfully.";
 
     return result.str();
 }
 
+
 /*
  * VAE diagnostic.
  *
- * ONLY IMPORTANT CHANGE:
+ * The map() path has intentionally been removed.
  *
- * The old version attempted:
+ * New path:
  *
- *     latentInput->map(MAP_TENSOR_WRITE, ...)
- *
- * That returned nullptr on this OpenCL backend.
- *
- * We now use:
- *
- *     MNN::Tensor hostTensor(latentInput, CAFFE);
- *     latentInput->copyFromHostTensor(&hostTensor);
- *
- * which is the MNN documented host->device input path.
+ *     host tensor
+ *          |
+ *          v
+ *     copyFromHostTensor()
+ *          |
+ *          v
+ *     OpenCL device tensor
+ *          |
+ *          v
+ *     runSession()
  */
 static std::string testVaeInternal(
     const std::string& vaePath,
@@ -879,12 +789,12 @@ static std::string testVaeInternal(
         << size
         << " bytes\n\n";
 
-    auto interpreter =
+    MNN::Interpreter* interpreter =
         createInterpreter(
             vaePath
         );
 
-    if (!interpreter) {
+    if (interpreter == nullptr) {
 
         result
             << "FAIL: VAE interpreter creation failed.";
@@ -897,16 +807,10 @@ static std::string testVaeInternal(
 
     MNN::ScheduleConfig config{};
 
-    if (preferOpenCl) {
-
-        config.type =
-            MNN_FORWARD_OPENCL;
-
-    } else {
-
-        config.type =
-            MNN_FORWARD_CPU;
-    }
+    config.type =
+        preferOpenCl
+            ? MNN_FORWARD_OPENCL
+            : MNN_FORWARD_CPU;
 
     config.numThread =
         4;
@@ -930,10 +834,14 @@ static std::string testVaeInternal(
             config
         );
 
-    if (!session) {
+    if (session == nullptr) {
 
         result
             << "FAIL: Could not create VAE session.";
+
+        MNN::Interpreter::destroy(
+            interpreter
+        );
 
         return result.str();
     }
@@ -953,11 +861,8 @@ static std::string testVaeInternal(
             "latent"
         );
 
-    if (!latentInput) {
+    if (latentInput == nullptr) {
 
-        /*
-         * Fallback for a single-input model.
-         */
         latentInput =
             interpreter->getSessionInput(
                 session,
@@ -965,13 +870,17 @@ static std::string testVaeInternal(
             );
     }
 
-    if (!latentInput) {
+    if (latentInput == nullptr) {
 
         result
             << "FAIL: Could not find VAE latent input.";
 
         interpreter->releaseSession(
             session
+        );
+
+        MNN::Interpreter::destroy(
+            interpreter
         );
 
         return result.str();
@@ -1008,7 +917,7 @@ static std::string testVaeInternal(
         << "\n\n";
 
     /*
-     * VAE latent shape:
+     * Expected Sana VAE latent:
      *
      * [1, 32, 16, 16]
      */
@@ -1023,8 +932,7 @@ static std::string testVaeInternal(
 
     /*
      * IMPORTANT:
-     *
-     * Re-acquire the input AFTER resizeSession().
+     * Re-acquire after resizeSession().
      */
     latentInput =
         interpreter->getSessionInput(
@@ -1032,7 +940,7 @@ static std::string testVaeInternal(
             "latent"
         );
 
-    if (!latentInput) {
+    if (latentInput == nullptr) {
 
         latentInput =
             interpreter->getSessionInput(
@@ -1041,13 +949,17 @@ static std::string testVaeInternal(
             );
     }
 
-    if (!latentInput) {
+    if (latentInput == nullptr) {
 
         result
-            << "FAIL: Could not reacquire VAE latent input after resize.";
+            << "FAIL: Could not reacquire VAE latent input.";
 
         interpreter->releaseSession(
             session
+        );
+
+        MNN::Interpreter::destroy(
+            interpreter
         );
 
         return result.str();
@@ -1080,15 +992,18 @@ static std::string testVaeInternal(
         << latentInput->deviceId()
         << "\n\n";
 
+
     /*
-     * ============================================================
-     * NEW VAE INPUT PATH
-     * ============================================================
+     * =========================================================
+     * HOST TENSOR INPUT
+     * =========================================================
      *
-     * Do NOT map the OpenCL tensor.
+     * MNN's documented NCHW path for ONNX/Caffe/TorchScript:
      *
-     * Instead create a host-side NCHW tensor that matches
-     * the device tensor and let MNN perform the transfer.
+     * Tensor hostTensor(inputTensor, Tensor::CAFFE);
+     * inputTensor->copyFromHostTensor(&hostTensor);
+     *
+     * No OpenCL map() call is made here.
      */
     result
         << "Creating host tensor for VAE input...\n";
@@ -1118,12 +1033,16 @@ static std::string testVaeInternal(
     if (hostLatent.getType().bytes() != 4) {
 
         result
-            << "FAIL: Expected float32 VAE host tensor but got "
+            << "FAIL: Expected float32 host tensor but received "
             << hostLatent.getType().bytes()
             << " bytes per element.";
 
         interpreter->releaseSession(
             session
+        );
+
+        MNN::Interpreter::destroy(
+            interpreter
         );
 
         return result.str();
@@ -1132,13 +1051,17 @@ static std::string testVaeInternal(
     float* latentData =
         hostLatent.host<float>();
 
-    if (!latentData) {
+    if (latentData == nullptr) {
 
         result
-            << "FAIL: Host tensor returned null data.";
+            << "FAIL: Host tensor data is null.";
 
         interpreter->releaseSession(
             session
+        );
+
+        MNN::Interpreter::destroy(
+            interpreter
         );
 
         return result.str();
@@ -1148,11 +1071,10 @@ static std::string testVaeInternal(
         hostLatent.elementSize();
 
     /*
-     * Deterministic latent test data.
+     * Deterministic test latent.
      *
-     * This is NOT intended to produce the final Sana image.
-     * It only verifies that the VAE graph can consume a valid
-     * [1,32,16,16] float tensor and execute.
+     * This is only a graph/inference test.
+     * It is NOT a generated image latent.
      */
     for (int i = 0;
          i < latentElements;
@@ -1184,13 +1106,16 @@ static std::string testVaeInternal(
         << latentData[3]
         << "\n\n";
 
+
     /*
-     * Transfer host tensor -> OpenCL device tensor.
+     * =========================================================
+     * HOST -> OPENCL DEVICE
+     * =========================================================
      */
     result
         << "Copying host tensor to OpenCL device...\n";
 
-    bool copied =
+    const bool copied =
         latentInput->copyFromHostTensor(
             &hostLatent
         );
@@ -1198,10 +1123,14 @@ static std::string testVaeInternal(
     if (!copied) {
 
         result
-            << "FAIL: MNN copyFromHostTensor() failed for VAE input.";
+            << "FAIL: MNN copyFromHostTensor() failed.";
 
         interpreter->releaseSession(
             session
+        );
+
+        MNN::Interpreter::destroy(
+            interpreter
         );
 
         return result.str();
@@ -1210,8 +1139,11 @@ static std::string testVaeInternal(
     result
         << "Host -> device copy: SUCCESS\n\n";
 
+
     /*
-     * Now execute the VAE graph.
+     * =========================================================
+     * VAE INFERENCE
+     * =========================================================
      */
     result
         << "Running VAE inference...\n";
@@ -1251,11 +1183,18 @@ static std::string testVaeInternal(
             session
         );
 
+        MNN::Interpreter::destroy(
+            interpreter
+        );
+
         return result.str();
     }
 
+
     /*
-     * Inspect VAE outputs.
+     * =========================================================
+     * OUTPUT
+     * =========================================================
      */
     const auto& outputs =
         interpreter->getSessionOutputAll(
@@ -1272,7 +1211,7 @@ static std::string testVaeInternal(
         MNN::Tensor* output =
             item.second;
 
-        if (!output) {
+        if (output == nullptr) {
             continue;
         }
 
@@ -1311,6 +1250,10 @@ static std::string testVaeInternal(
         session
     );
 
+    MNN::Interpreter::destroy(
+        interpreter
+    );
+
     result
         << "VAE released successfully.";
 
@@ -1318,6 +1261,7 @@ static std::string testVaeInternal(
 }
 
 } // namespace
+
 
 extern "C"
 JNIEXPORT jboolean JNICALL
@@ -1370,6 +1314,7 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
         : JNI_FALSE;
 }
 
+
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
@@ -1384,6 +1329,7 @@ Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
         ? JNI_TRUE
         : JNI_FALSE;
 }
+
 
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -1403,6 +1349,7 @@ Java_com_sana_android_engine_NativeSana_nativeGetBackend(
     );
 }
 
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeGetStatus(
@@ -1420,6 +1367,7 @@ Java_com_sana_android_engine_NativeSana_nativeGetStatus(
         status.c_str()
     );
 }
+
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -1442,6 +1390,7 @@ Java_com_sana_android_engine_NativeSana_nativeRelease(
     gStatus =
         "Not initialized";
 }
+
 
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -1480,6 +1429,7 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
     );
 }
 
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeTestVae(
@@ -1516,6 +1466,7 @@ Java_com_sana_android_engine_NativeSana_nativeTestVae(
         output.c_str()
     );
 }
+
 
 extern "C"
 JNIEXPORT jstring JNICALL
