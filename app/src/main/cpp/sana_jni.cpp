@@ -384,8 +384,7 @@ std::string runTransformerDiagnostic(
             << "\n\n";
 
 
-    // IMPORTANT:
-    // Host tensors are derived from their device tensors.
+    // Device-derived host tensors.
 
     MNN::Tensor encoderHost(
             encoderInput,
@@ -564,7 +563,7 @@ std::string runTransformerDiagnostic(
 
 
 // ============================================================
-// VAE - ONE BACKEND
+// VAE DIAGNOSTIC
 // ============================================================
 
 std::string runVaeOneBackend(
@@ -577,14 +576,9 @@ std::string runVaeOneBackend(
             << "\n========================================\n";
 
     if (useOpenCl) {
-
-        report
-                << "VAE OPENCL TEST\n";
-
+        report << "VAE OPENCL TEST\n";
     } else {
-
-        report
-                << "VAE CPU TEST\n";
+        report << "VAE CPU TEST\n";
     }
 
     report
@@ -637,6 +631,7 @@ std::string runVaeOneBackend(
             MNN::Interpreter::createFromFile(
                     vaePath.c_str());
 
+
     if (interpreter == nullptr) {
 
         report
@@ -644,6 +639,7 @@ std::string runVaeOneBackend(
 
         return report.str();
     }
+
 
     report
             << "Interpreter created.\n\n";
@@ -662,6 +658,7 @@ std::string runVaeOneBackend(
                     interpreter,
                     useOpenCl);
 
+
     if (session == nullptr) {
 
         report
@@ -673,6 +670,7 @@ std::string runVaeOneBackend(
 
         return report.str();
     }
+
 
     report
             << "Session created.\n\n";
@@ -686,6 +684,7 @@ std::string runVaeOneBackend(
             interpreter->getSessionInput(
                     session,
                     "latent");
+
 
     if (input == nullptr) {
 
@@ -701,6 +700,7 @@ std::string runVaeOneBackend(
                         nullptr);
     }
 
+
     if (input == nullptr) {
 
         report
@@ -715,7 +715,7 @@ std::string runVaeOneBackend(
 
 
     // --------------------------------------------------------
-    // INPUT INFO
+    // INPUT INFORMATION
     // --------------------------------------------------------
 
     report
@@ -784,72 +784,199 @@ std::string runVaeOneBackend(
             << "PASS: VAE input shape is [1,32,16,16].\n\n";
 
 
-    // --------------------------------------------------------
-    // IMPORTANT HOST TENSOR TEST
-    // --------------------------------------------------------
+    // ========================================================
+    // TEST 1
+    // DIRECT DEVICE MAPPING
+    // ========================================================
 
     report
-            << "Creating device-derived MNN host tensor...\n\n";
+            << "TEST 1: Mapping device input for WRITE...\n";
 
 
-    /*
-     * IMPORTANT:
-     *
-     * Do NOT create an unrelated tensor with:
-     *
-     *     MNN::Tensor(4, CAFFE)
-     *
-     * Instead derive the host tensor directly from the
-     * session input tensor.
-     */
-
-    MNN::Tensor hostTensor(
-            input,
-            MNN::Tensor::CAFFE);
+    int waitResult =
+            input->wait(
+                    MNN::Tensor::MAP_TENSOR_WRITE,
+                    true);
 
 
     report
-            << "Host tensor shape: "
-            << formatShape(
-                    &hostTensor)
-            << "\n\n";
-
-    report
-            << "Host tensor elements: "
-            << hostTensor.elementSize()
-            << "\n\n";
-
-    report
-            << "Host tensor type: "
-            << static_cast<int>(
-                    hostTensor.getType().code)
-            << "\n\n";
-
-    report
-            << "Host tensor bytes: "
-            << hostTensor.getType().bytes()
-            << "\n\n";
-
-    report
-            << "Host tensor format: "
-            << dimensionTypeName(
-                    hostTensor.getDimensionType())
-            << "\n\n";
-
-    report
-            << "Host tensor device ID: "
-            << hostTensor.deviceId()
-            << "\n\n";
+            << "wait(MAP_TENSOR_WRITE): "
+            << waitResult
+            << "\n";
 
 
-    float* latentData =
-            hostTensor.host<float>();
+    void* mapped =
+            input->map(
+                    MNN::Tensor::MAP_TENSOR_WRITE,
+                    MNN::Tensor::CAFFE);
 
 
-    if (latentData == nullptr) {
+    if (mapped != nullptr) {
 
         report
-                << "FAIL: Host tensor pointer is null.\n";
+                << "MAP: SUCCESS\n";
+
+
+        float* mappedFloat =
+                static_cast<float*>(
+                        mapped);
+
+
+        int elements =
+                input->elementSize();
+
+
+        for (int i = 0;
+             i < elements;
+             ++i) {
+
+            mappedFloat[i] =
+                    -0.05f +
+                    (
+                        static_cast<float>(
+                                i % 256)
+                        / 255.0f
+                    ) * 0.10f;
+        }
+
+
+        report
+                << "Mapped latent sample: "
+                << mappedFloat[0]
+                << ", "
+                << mappedFloat[1]
+                << ", "
+                << mappedFloat[2]
+                << ", "
+                << mappedFloat[3]
+                << "\n";
+
+
+        input->unmap(
+                MNN::Tensor::MAP_TENSOR_WRITE,
+                MNN::Tensor::CAFFE,
+                mapped);
+
+
+        report
+                << "UNMAP: SUCCESS\n\n";
+
+
+        // ----------------------------------------------------
+        // RUN AFTER DIRECT MAP
+        // ----------------------------------------------------
+
+        report
+                << "Running VAE after mapped input...\n";
+
+
+        auto start =
+                std::chrono::steady_clock::now();
+
+
+        MNN::ErrorCode result =
+                interpreter->runSession(
+                        session);
+
+
+        auto end =
+                std::chrono::steady_clock::now();
+
+
+        double elapsed =
+                std::chrono::duration<
+                        double,
+                        std::milli>(
+                                end - start)
+                .count();
+
+
+        report
+                << "VAE inference time: "
+                << elapsed
+                << " ms\n";
+
+
+        report
+                << "VAE error code: "
+                << static_cast<int>(
+                        result)
+                << "\n\n";
+
+
+        if (result == MNN::NO_ERROR) {
+
+            MNN::Tensor* output =
+                    interpreter->getSessionOutput(
+                            session,
+                            nullptr);
+
+
+            if (output != nullptr) {
+
+                report
+                        << "VAE output shape: "
+                        << formatShape(output)
+                        << "\n\n";
+
+
+                report
+                        << "VAE output elements: "
+                        << output->elementSize()
+                        << "\n\n";
+
+
+                report
+                        << "PASS: VAE executed successfully "
+                        << "using mapped input.\n";
+
+            } else {
+
+                report
+                        << "FAIL: VAE executed but output "
+                        << "tensor was not found.\n";
+            }
+
+        } else {
+
+            report
+                    << "FAIL: VAE inference returned error.\n";
+        }
+
+
+        destroyInterpreter(
+                interpreter,
+                session);
+
+
+        return report.str();
+    }
+
+
+    // ========================================================
+    // TEST 2
+    // HOST TENSOR FROM DEVICE
+    // ========================================================
+
+    report
+            << "MAP: FAILED\n\n";
+
+
+    report
+            << "TEST 2: createHostTensorFromDevice...\n";
+
+
+    MNN::Tensor* hostTensor =
+            MNN::Tensor::createHostTensorFromDevice(
+                    input,
+                    false);
+
+
+    if (hostTensor == nullptr) {
+
+        report
+                << "FAIL: Could not create host tensor "
+                << "from device tensor.\n";
 
         destroyInterpreter(
                 interpreter,
@@ -860,69 +987,110 @@ std::string runVaeOneBackend(
 
 
     report
-            << "PASS: Host memory allocated.\n\n";
+            << "Host tensor created successfully.\n";
+
+
+    report
+            << "Host shape: "
+            << formatShape(hostTensor)
+            << "\n";
+
+
+    report
+            << "Host elements: "
+            << hostTensor->elementSize()
+            << "\n";
+
+
+    report
+            << "Host type: "
+            << static_cast<int>(
+                    hostTensor->getType().code)
+            << "\n";
+
+
+    report
+            << "Host bytes: "
+            << hostTensor->getType().bytes()
+            << "\n";
+
+
+    report
+            << "Host format: "
+            << dimensionTypeName(
+                    hostTensor->getDimensionType())
+            << "\n\n";
+
+
+    float* hostData =
+            hostTensor->host<float>();
+
+
+    if (hostData == nullptr) {
+
+        report
+                << "FAIL: Host tensor memory is null.\n";
+
+        MNN::Tensor::destroy(
+                hostTensor);
+
+        destroyInterpreter(
+                interpreter,
+                session);
+
+        return report.str();
+    }
+
+
+    report
+            << "Host memory acquired.\n";
 
 
     // --------------------------------------------------------
-    // LATENT DATA
+    // LATENT
     // --------------------------------------------------------
+
+    int elements =
+            hostTensor->elementSize();
+
 
     for (int i = 0;
-         i < hostTensor.elementSize();
+         i < elements;
          ++i) {
 
-        /*
-         * Small deterministic latent values.
-         *
-         * This is only a transport/inference diagnostic.
-         * It is NOT intended to produce a meaningful image.
-         */
-
-        latentData[i] =
+        hostData[i] =
                 -0.05f +
                 (
                     static_cast<float>(
-                        i % 256)
+                            i % 256)
                     / 255.0f
                 ) * 0.10f;
     }
 
 
     report
-            << "Latent sample:\n";
-
-    int sampleCount =
-            std::min(
-                    4,
-                    hostTensor.elementSize());
-
-    for (int i = 0;
-         i < sampleCount;
-         ++i) {
-
-        if (i > 0) {
-            report << ", ";
-        }
-
-        report
-                << latentData[i];
-    }
-
-    report
+            << "Host latent sample: "
+            << hostData[0]
+            << ", "
+            << hostData[1]
+            << ", "
+            << hostData[2]
+            << ", "
+            << hostData[3]
             << "\n\n";
 
 
     // --------------------------------------------------------
-    // DEVICE COPY
+    // COPY
     // --------------------------------------------------------
 
     report
-            << "Calling device input copyFromHostTensor...\n";
+            << "Calling copyFromHostTensor...\n";
 
 
     bool copied =
             input->copyFromHostTensor(
-                    &hostTensor);
+                    hostTensor);
 
 
     report
@@ -938,16 +1106,10 @@ std::string runVaeOneBackend(
     if (!copied) {
 
         report
-                << "RESULT: ";
+                << "RESULT: Host-to-device copy failed.\n";
 
-        if (useOpenCl) {
-            report << "OpenCL";
-        } else {
-            report << "CPU";
-        }
-
-        report
-                << " VAE input copy failed.\n";
+        MNN::Tensor::destroy(
+                hostTensor);
 
         destroyInterpreter(
                 interpreter,
@@ -957,12 +1119,13 @@ std::string runVaeOneBackend(
     }
 
 
-    // --------------------------------------------------------
-    // RUN VAE
-    // --------------------------------------------------------
-
     report
             << "PASS: VAE input copied successfully.\n\n";
+
+
+    // --------------------------------------------------------
+    // RUN
+    // --------------------------------------------------------
 
     report
             << "Running VAE inference...\n";
@@ -982,15 +1145,18 @@ std::string runVaeOneBackend(
 
 
     double elapsed =
-            std::chrono::duration<double, std::milli>(
-                    end - start)
+            std::chrono::duration<
+                    double,
+                    std::milli>(
+                            end - start)
             .count();
 
 
     report
             << "VAE inference time: "
             << elapsed
-            << " ms\n\n";
+            << " ms\n";
+
 
     report
             << "VAE error code: "
@@ -1003,6 +1169,9 @@ std::string runVaeOneBackend(
 
         report
                 << "RESULT: VAE inference FAILED.\n";
+
+        MNN::Tensor::destroy(
+                hostTensor);
 
         destroyInterpreter(
                 interpreter,
@@ -1027,6 +1196,9 @@ std::string runVaeOneBackend(
         report
                 << "RESULT: VAE output tensor not found.\n";
 
+        MNN::Tensor::destroy(
+                hostTensor);
+
         destroyInterpreter(
                 interpreter,
                 session);
@@ -1040,6 +1212,7 @@ std::string runVaeOneBackend(
             << formatShape(output)
             << "\n\n";
 
+
     report
             << "VAE output elements: "
             << output->elementSize()
@@ -1048,6 +1221,10 @@ std::string runVaeOneBackend(
 
     report
             << "PASS: VAE executed successfully.\n";
+
+
+    MNN::Tensor::destroy(
+            hostTensor);
 
 
     destroyInterpreter(
@@ -1084,46 +1261,57 @@ std::string runVaeDualDiagnostic(
             << "The Transformer is completely excluded.\n\n";
 
 
+    // --------------------------------------------------------
     // CPU
+    // --------------------------------------------------------
 
     report
             << "Starting CPU VAE test...\n";
+
 
     std::string cpuResult =
             runVaeOneBackend(
                     vaePath,
                     false);
 
+
     report
             << cpuResult
             << "\n";
 
 
-    // OpenCL
+    // --------------------------------------------------------
+    // OPENCL
+    // --------------------------------------------------------
 
     report
             << "Starting OpenCL VAE test...\n";
+
 
     std::string openClResult =
             runVaeOneBackend(
                     vaePath,
                     true);
 
+
     report
             << openClResult
             << "\n";
 
 
-    // Summary
+    // --------------------------------------------------------
+    // SUMMARY
+    // --------------------------------------------------------
 
     bool cpuPass =
             cpuResult.find(
                     "PASS: VAE executed successfully.")
             != std::string::npos;
 
+
     bool openClPass =
             openClResult.find(
-                    "PASS: VAE executed successfully.")
+                    "PASS: VAE executed successfully")
             != std::string::npos;
 
 
@@ -1183,7 +1371,7 @@ std::string runVaeDualDiagnostic(
 
 
 // ============================================================
-// JNI - INITIALIZE
+// JNI INITIALIZE
 // ============================================================
 
 extern "C"
@@ -1233,6 +1421,7 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
             jstringToString(
                     env,
                     modelAsset);
+
 
     std::string cache =
             jstringToString(
@@ -1389,7 +1578,7 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
 
 
 // ============================================================
-// JNI - STATE
+// JNI STATE
 // ============================================================
 
 extern "C"
@@ -1436,7 +1625,7 @@ Java_com_sana_android_engine_NativeSana_nativeGetStatus(
 
 
 // ============================================================
-// JNI - RELEASE
+// JNI RELEASE
 // ============================================================
 
 extern "C"
@@ -1453,7 +1642,7 @@ Java_com_sana_android_engine_NativeSana_nativeRelease(
 
 
 // ============================================================
-// JNI - TRANSFORMER TEST
+// JNI TRANSFORMER TEST
 // ============================================================
 
 extern "C"
@@ -1470,10 +1659,12 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
                     env,
                     transformerPath);
 
+
     std::string cache =
             jstringToString(
                     env,
                     cachePath);
+
 
     std::string result =
             runTransformerDiagnostic(
@@ -1481,13 +1672,14 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
                     cache,
                     preferOpenCl);
 
+
     return env->NewStringUTF(
             result.c_str());
 }
 
 
 // ============================================================
-// JNI - VAE TEST
+// JNI VAE TEST
 // ============================================================
 
 extern "C"
@@ -1520,7 +1712,7 @@ Java_com_sana_android_engine_NativeSana_nativeTestVae(
 
 
 // ============================================================
-// JNI - BOTH MODELS
+// JNI BOTH MODELS
 // ============================================================
 
 extern "C"
@@ -1538,10 +1730,12 @@ Java_com_sana_android_engine_NativeSana_nativeTestModels(
                     env,
                     transformerPath);
 
+
     std::string vae =
             jstringToString(
                     env,
                     vaePath);
+
 
     std::string cache =
             jstringToString(
