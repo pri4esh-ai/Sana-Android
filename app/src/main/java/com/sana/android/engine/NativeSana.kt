@@ -18,13 +18,23 @@ object NativeSana {
     ): Boolean
 
     external fun nativeIsInitialized(): Boolean
+
     external fun nativeGetBackend(): String
+
     external fun nativeGetStatus(): String
+
     external fun nativeRelease()
 
-    external fun nativeTestModels(
+    /**
+     * Transformer-only diagnostic.
+     *
+     * IMPORTANT:
+     * - Loads ONLY sana_transformer.mnn
+     * - Does NOT load the VAE
+     * - Does NOT create a second Transformer session
+     */
+    external fun nativeTestTransformer(
         transformerPath: String,
-        vaePath: String,
         cachePath: String,
         preferOpenCl: Boolean
     ): String
@@ -44,25 +54,28 @@ object NativeSana {
         )
     }
 
-    fun isInitialized() = nativeIsInitialized()
+    fun isInitialized(): Boolean =
+        nativeIsInitialized()
 
-    fun backend() = nativeGetBackend()
+    fun backend(): String =
+        nativeGetBackend()
 
-    fun status() = nativeGetStatus()
+    fun status(): String =
+        nativeGetStatus()
 
-    fun release() = nativeRelease()
+    fun release() {
+        nativeRelease()
+    }
 
-    fun testModels(
+    fun testTransformer(
         context: Context,
         transformerFile: File,
-        vaeFile: File,
         preferOpenCl: Boolean = true
     ): String {
-        return nativeTestModels(
-            transformerFile.absolutePath,
-            vaeFile.absolutePath,
-            context.cacheDir.absolutePath,
-            preferOpenCl
+        return nativeTestTransformer(
+            transformerPath = transformerFile.absolutePath,
+            cachePath = context.cacheDir.absolutePath,
+            preferOpenCl = preferOpenCl
         )
     }
 }
