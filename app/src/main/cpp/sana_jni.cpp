@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -210,13 +211,6 @@ MNN::ScheduleConfig makeScheduleConfig(
         config.type =
             MNN_FORWARD_OPENCL;
 
-        /*
-         * GPU uses mode.
-         *
-         * ScheduleConfig stores CPU thread count
-         * and GPU mode in the same union.
-         */
-
         config.mode =
             MNN_GPU_TUNING_HEAVY;
 
@@ -253,11 +247,6 @@ bool createSession(
             cpuThreads
         );
 
-    /*
-     * Let unsupported operations fall back to CPU
-     * when using OpenCL.
-     */
-
     if (preferOpenCl) {
 
         config.backupType =
@@ -283,6 +272,32 @@ bool createSession(
 
 
 // ============================================================
+// READ FILE SIZE
+// ============================================================
+
+long long getFileSize(
+        const std::string& path) {
+
+    std::ifstream file(
+        path,
+        std::ios::binary |
+        std::ios::ate
+    );
+
+    if (!file.good()) {
+        return -1;
+    }
+
+    std::streamsize size =
+        file.tellg();
+
+    file.close();
+
+    return static_cast<long long>(size);
+}
+
+
+// ============================================================
 // TRANSFORMER DIAGNOSTIC
 // ============================================================
 
@@ -290,6 +305,8 @@ std::string runTransformerDiagnostic(
         const std::string& modelPath,
         const std::string& cachePath,
         bool preferOpenCl) {
+
+    (void)cachePath;
 
     std::ostringstream result;
 
@@ -301,29 +318,16 @@ std::string runTransformerDiagnostic(
         << modelPath
         << "\n\n";
 
+    long long fileSize =
+        getFileSize(modelPath);
 
-    // --------------------------------------------------------
-    // FILE
-    // --------------------------------------------------------
-
-    std::ifstream file(
-        modelPath,
-        std::ios::binary |
-        std::ios::ate
-    );
-
-    if (!file.good()) {
+    if (fileSize < 0) {
 
         result
             << "FAIL: Transformer file does not exist.";
 
         return result.str();
     }
-
-    std::streamsize fileSize =
-        file.tellg();
-
-    file.close();
 
     result
         << "File size: "
@@ -704,7 +708,7 @@ std::string runTransformerDiagnostic(
 
 
 // ============================================================
-// CPU VAE ISOLATION TEST
+// VAE CPU DIRECT-HOST TEST
 // ============================================================
 
 std::string runVaeCpuIsolationTest(
@@ -715,25 +719,25 @@ std::string runVaeCpuIsolationTest(
     result
         << "\n\n"
         << "========================================\n"
-        << "VAE CPU ISOLATION TEST\n"
+        << "VAE CPU DIRECT-HOST TEST\n"
         << "========================================\n\n";
 
-
     result
-        << "Purpose:\n"
-        << "Determine whether the VAE model itself works\n"
-        << "independently of the OpenCL host-to-device path.\n\n";
+        << "This test bypasses OpenCL completely.\n"
+        << "CPU input is filled directly through host memory.\n\n";
 
+
+    // --------------------------------------------------------
+    // CREATE CPU INTERPRETER
+    // --------------------------------------------------------
 
     result
         << "Creating CPU interpreter...\n";
-
 
     MNN::Interpreter* interpreter =
         MNN::Interpreter::createFromFile(
             modelPath.c_str()
         );
-
 
     if (interpreter == nullptr) {
 
@@ -743,13 +747,15 @@ std::string runVaeCpuIsolationTest(
         return result.str();
     }
 
-
     result
         << "CPU interpreter created.\n";
 
 
-    MNN::Session* session = nullptr;
+    // --------------------------------------------------------
+    // CPU SESSION
+    // --------------------------------------------------------
 
+    MNN::Session* session = nullptr;
 
     if (!createSession(
             interpreter,
@@ -767,17 +773,19 @@ std::string runVaeCpuIsolationTest(
         return result.str();
     }
 
-
     result
         << "CPU session created.\n\n";
 
+
+    // --------------------------------------------------------
+    // INPUT
+    // --------------------------------------------------------
 
     MNN::Tensor* input =
         interpreter->getSessionInput(
             session,
             "latent"
         );
-
 
     if (input == nullptr) {
 
@@ -818,12 +826,16 @@ std::string runVaeCpuIsolationTest(
 
     result
         << "CPU input type code: "
-        << input->getType().code
+        << static_cast<int>(
+            input->getType().code
+        )
         << "\n";
 
     result
         << "CPU input bytes: "
-        << input->getType().bytes()
+        << static_cast<int>(
+            input->getType().bytes()
+        )
         << "\n";
 
     result
@@ -834,18 +846,19 @@ std::string runVaeCpuIsolationTest(
         << "\n\n";
 
 
+    // --------------------------------------------------------
+    // EXPECTED SHAPE
+    // --------------------------------------------------------
+
     std::vector<int> expectedShape = {
-        1,
-        32,
-        16,
-        16
+        1, 32, 16, 16
     };
 
 
     if (input->shape() != expectedShape) {
 
         result
-            << "CPU input requires resize.\n";
+            << "Applying CPU VAE resize...\n";
 
         interpreter->resizeTensor(
             input,
@@ -855,107 +868,30 @@ std::string runVaeCpuIsolationTest(
         interpreter->resizeSession(
             session
         );
-
-        result
-            << "CPU resizeSession completed.\n";
     }
 
 
     result
-        << "Creating CPU host tensor...\n";
-
-
-    MNN::Tensor* hostTensor =
-        new MNN::Tensor(
-            input,
-            input->getDimensionType()
-        );
-
-
-    if (hostTensor == nullptr) {
-
-        result
-            << "FAIL: CPU host tensor creation failed.";
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
-
-        return result.str();
-    }
-
-
-    float* hostData =
-        hostTensor->host<float>();
-
-
-    if (hostData == nullptr) {
-
-        result
-            << "FAIL: CPU host tensor has no memory.";
-
-        delete hostTensor;
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
-
-        return result.str();
-    }
-
-
-    int count =
-        hostTensor->elementSize();
-
-
-    for (int i = 0;
-         i < count;
-         ++i) {
-
-        hostData[i] =
-            -0.05f +
-            static_cast<float>(i) *
-            0.000390625f;
-    }
-
-
-    result
-        << "CPU host tensor elements: "
-        << count
-        << "\n";
-
-
-    result
-        << "Copying CPU host tensor...\n";
-
-
-    bool copied =
-        input->copyFromHostTensor(
-            hostTensor
-        );
-
-
-    delete hostTensor;
-
-
-    result
-        << "CPU copy result: "
-        << (copied ? "SUCCESS" : "FAILED")
+        << "Final CPU input shape: "
+        << formatShape(input)
         << "\n\n";
 
 
-    if (!copied) {
+    // --------------------------------------------------------
+    // DIRECT HOST POINTER
+    // --------------------------------------------------------
+
+    result
+        << "Getting CPU host pointer...\n";
+
+    float* host =
+        input->host<float>();
+
+
+    if (host == nullptr) {
 
         result
-            << "FAIL: CPU copyFromHostTensor() also failed.\n";
+            << "FAIL: CPU input host pointer is null.";
 
         interpreter->releaseSession(
             session
@@ -968,20 +904,57 @@ std::string runVaeCpuIsolationTest(
         return result.str();
     }
 
+
+    result
+        << "CPU host pointer acquired.\n";
+
+
+    // --------------------------------------------------------
+    // FILL LATENT
+    // --------------------------------------------------------
+
+    const int elements =
+        input->elementSize();
+
+    for (int i = 0;
+         i < elements;
+         ++i) {
+
+        host[i] =
+            -0.05f +
+            0.000390625f *
+            static_cast<float>(
+                i % 256
+            );
+    }
+
+
+    result
+        << "CPU latent sample: "
+        << host[0]
+        << ", "
+        << host[1]
+        << ", "
+        << host[2]
+        << ", "
+        << host[3]
+        << "\n\n";
+
+
+    // --------------------------------------------------------
+    // RUN CPU
+    // --------------------------------------------------------
 
     result
         << "Running CPU VAE inference...\n";
 
-
     auto start =
         std::chrono::steady_clock::now();
-
 
     int errorCode =
         interpreter->runSession(
             session
         );
-
 
     auto end =
         std::chrono::steady_clock::now();
@@ -994,627 +967,14 @@ std::string runVaeCpuIsolationTest(
 
 
     result
-        << "CPU inference time: "
+        << "CPU VAE time: "
         << elapsed
         << " ms\n";
 
     result
-        << "CPU error code: "
+        << "CPU VAE error code: "
         << errorCode
         << "\n\n";
-
-
-    MNN::Tensor* output =
-        interpreter->getSessionOutput(
-            session,
-            nullptr
-        );
-
-
-    if (output != nullptr) {
-
-        result
-            << "CPU output shape: "
-            << formatShape(output)
-            << "\n";
-
-        result
-            << "CPU output elements: "
-            << output->elementSize()
-            << "\n";
-    }
-
-
-    if (errorCode == 0) {
-
-        result
-            << "\nCPU VAE PASS.\n"
-            << "The VAE model executes successfully on CPU.\n"
-            << "Therefore the remaining problem is specifically\n"
-            << "the OpenCL/device transfer path.\n";
-
-    } else {
-
-        result
-            << "\nCPU VAE FAIL.\n"
-            << "The problem is not limited to OpenCL transfer.\n";
-    }
-
-
-    interpreter->releaseSession(
-        session
-    );
-
-    destroyInterpreter(
-        interpreter
-    );
-
-
-    return result.str();
-}
-
-
-// ============================================================
-// VAE OPENCL DIAGNOSTIC
-// ============================================================
-
-std::string runVaeDiagnostic(
-        const std::string& modelPath,
-        const std::string& cachePath,
-        bool preferOpenCl) {
-
-    std::ostringstream result;
-
-    result
-        << "VAE Decoder\n"
-        << "===\n\n";
-
-
-    result
-        << "Model file:\n"
-        << modelPath
-        << "\n\n";
-
-
-    // --------------------------------------------------------
-    // FILE
-    // --------------------------------------------------------
-
-    std::ifstream file(
-        modelPath,
-        std::ios::binary |
-        std::ios::ate
-    );
-
-    if (!file.good()) {
-
-        result
-            << "FAIL: VAE model file does not exist.";
-
-        return result.str();
-    }
-
-
-    std::streamsize fileSize =
-        file.tellg();
-
-    file.close();
-
-
-    result
-        << "File size: "
-        << fileSize
-        << " bytes\n\n";
-
-
-    // --------------------------------------------------------
-    // INTERPRETER
-    // --------------------------------------------------------
-
-    MNN::Interpreter* interpreter =
-        MNN::Interpreter::createFromFile(
-            modelPath.c_str()
-        );
-
-
-    if (interpreter == nullptr) {
-
-        result
-            << "FAIL: Could not create VAE interpreter.";
-
-        return result.str();
-    }
-
-
-    result
-        << "Interpreter created.\n\n";
-
-
-    // --------------------------------------------------------
-    // SESSION
-    // --------------------------------------------------------
-
-    MNN::Session* session = nullptr;
-
-
-    if (!createSession(
-            interpreter,
-            session,
-            preferOpenCl,
-            4)) {
-
-        result
-            << "FAIL: Could not create VAE session.";
-
-        destroyInterpreter(
-            interpreter
-        );
-
-        return result.str();
-    }
-
-
-    result
-        << "Backend: "
-        << backendName(preferOpenCl)
-        << "\n\n";
-
-
-    // --------------------------------------------------------
-    // INPUT
-    // --------------------------------------------------------
-
-    MNN::Tensor* input =
-        interpreter->getSessionInput(
-            session,
-            "latent"
-        );
-
-
-    if (input == nullptr) {
-
-        input =
-            interpreter->getSessionInput(
-                session,
-                nullptr
-            );
-    }
-
-
-    if (input == nullptr) {
-
-        result
-            << "FAIL: VAE latent input not found.";
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
-
-        return result.str();
-    }
-
-
-    result
-        << "Input: latent\n\n";
-
-
-    result
-        << "Original shape: "
-        << formatShape(input)
-        << "\n";
-
-
-    result
-        << "Original elements: "
-        << input->elementSize()
-        << "\n";
-
-
-    result
-        << "Original tensor type code: "
-        << input->getType().code
-        << "\n";
-
-
-    result
-        << "Original tensor bytes: "
-        << input->getType().bytes()
-        << "\n";
-
-
-    result
-        << "Original dimension type: "
-        << dimensionTypeName(
-            input->getDimensionType()
-        )
-        << "\n";
-
-
-    result
-        << "Original device ID: "
-        << input->deviceId()
-        << "\n\n";
-
-
-    // --------------------------------------------------------
-    // EXPECTED SHAPE
-    // --------------------------------------------------------
-
-    std::vector<int> expectedShape = {
-        1,
-        32,
-        16,
-        16
-    };
-
-
-    /*
-     * Always explicitly perform the resize path for this
-     * diagnostic. This ensures the session has gone through
-     * MNN's tensor/session resize lifecycle.
-     */
-
-    result
-        << "Applying explicit VAE tensor resize...\n";
-
-
-    interpreter->resizeTensor(
-        input,
-        expectedShape
-    );
-
-
-    result
-        << "Calling resizeSession()...\n";
-
-
-    interpreter->resizeSession(
-        session
-    );
-
-
-    result
-        << "resizeSession() completed.\n\n";
-
-
-    result
-        << "Resized shape: "
-        << formatShape(input)
-        << "\n";
-
-
-    result
-        << "Resized elements: "
-        << input->elementSize()
-        << "\n";
-
-
-    result
-        << "Resized tensor type code: "
-        << input->getType().code
-        << "\n";
-
-
-    result
-        << "Resized tensor bytes: "
-        << input->getType().bytes()
-        << "\n";
-
-
-    result
-        << "Resized dimension type: "
-        << dimensionTypeName(
-            input->getDimensionType()
-        )
-        << "\n";
-
-
-    result
-        << "Resized device ID: "
-        << input->deviceId()
-        << "\n\n";
-
-
-    // --------------------------------------------------------
-    // WAIT DIAGNOSTIC
-    // --------------------------------------------------------
-
-    if (preferOpenCl) {
-
-        result
-            << "Testing OpenCL input wait/write state...\n";
-
-
-        int waitResult =
-            input->wait(
-                MNN::Tensor::MAP_TENSOR_WRITE,
-                true
-            );
-
-
-        result
-            << "Input wait(MAP_TENSOR_WRITE, true): "
-            << waitResult
-            << "\n\n";
-    }
-
-
-    // --------------------------------------------------------
-    // HOST TENSOR
-    // --------------------------------------------------------
-
-    result
-        << "Creating host tensor for VAE input...\n";
-
-
-    MNN::Tensor* hostTensor =
-        new MNN::Tensor(
-            input,
-            input->getDimensionType()
-        );
-
-
-    if (hostTensor == nullptr) {
-
-        result
-            << "FAIL: Could not create host tensor.";
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
-
-        return result.str();
-    }
-
-
-    result
-        << "Host tensor shape: "
-        << formatShape(hostTensor)
-        << "\n";
-
-
-    result
-        << "Host tensor elements: "
-        << hostTensor->elementSize()
-        << "\n";
-
-
-    result
-        << "Host tensor bytes: "
-        << hostTensor->getType().bytes()
-        << "\n";
-
-
-    result
-        << "Host dimension type: "
-        << dimensionTypeName(
-            hostTensor->getDimensionType()
-        )
-        << "\n";
-
-
-    result
-        << "Host device ID: "
-        << hostTensor->deviceId()
-        << "\n";
-
-
-    // --------------------------------------------------------
-    // HOST MEMORY
-    // --------------------------------------------------------
-
-    float* hostLatent =
-        hostTensor->host<float>();
-
-
-    if (hostLatent == nullptr) {
-
-        result
-            << "\nFAIL: Host tensor has no host memory.";
-
-        delete hostTensor;
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
-
-        return result.str();
-    }
-
-
-    int elementCount =
-        hostTensor->elementSize();
-
-
-    result
-        << "\nHost latent elements: "
-        << elementCount
-        << "\n\n";
-
-
-    // --------------------------------------------------------
-    // TEST LATENT
-    // --------------------------------------------------------
-
-    for (int i = 0;
-         i < elementCount;
-         ++i) {
-
-        hostLatent[i] =
-            -0.05f +
-            static_cast<float>(i) *
-            0.000390625f;
-    }
-
-
-    if (elementCount >= 4) {
-
-        result
-            << "Latent sample: "
-            << hostLatent[0]
-            << ", "
-            << hostLatent[1]
-            << ", "
-            << hostLatent[2]
-            << ", "
-            << hostLatent[3]
-            << "\n";
-    }
-
-
-    // --------------------------------------------------------
-    // OPENCL COPY
-    // --------------------------------------------------------
-
-    result
-        << "\nCopying host tensor to device...\n";
-
-
-    bool copied =
-        input->copyFromHostTensor(
-            hostTensor
-        );
-
-
-    delete hostTensor;
-
-
-    if (!copied) {
-
-        result
-            << "\nFAIL: MNN copyFromHostTensor() failed.\n";
-
-
-        result
-            << "\nInput dimension type: "
-            << dimensionTypeName(
-                input->getDimensionType()
-            )
-            << "\n";
-
-
-        result
-            << "Input type code: "
-            << input->getType().code
-            << "\n";
-
-
-        result
-            << "Input bytes: "
-            << input->getType().bytes()
-            << "\n";
-
-
-        result
-            << "Input device ID: "
-            << input->deviceId()
-            << "\n";
-
-
-        result
-            << "\nHost-to-device transfer failed "
-               "before VAE inference.\n";
-
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
-
-
-        /*
-         * IMPORTANT:
-         *
-         * If OpenCL failed, immediately test the same
-         * model on CPU. This is the isolation step.
-         */
-
-        result
-            << runVaeCpuIsolationTest(
-                modelPath
-            );
-
-
-        return result.str();
-    }
-
-
-    result
-        << "Host tensor copied successfully.\n\n";
-
-
-    // --------------------------------------------------------
-    // RUN VAE
-    // --------------------------------------------------------
-
-    result
-        << "Running VAE inference...\n";
-
-
-    auto start =
-        std::chrono::steady_clock::now();
-
-
-    int errorCode =
-        interpreter->runSession(
-            session
-        );
-
-
-    auto end =
-        std::chrono::steady_clock::now();
-
-
-    double elapsed =
-        std::chrono::duration<double, std::milli>(
-            end - start
-        ).count();
-
-
-    result
-        << "\nTime: "
-        << elapsed
-        << " ms\n\n";
-
-
-    result
-        << "Error code: "
-        << errorCode
-        << "\n\n";
-
-
-    if (errorCode != 0) {
-
-        result
-            << "FAIL: VAE inference error.";
-
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
-
-
-        return result.str();
-    }
 
 
     // --------------------------------------------------------
@@ -1631,7 +991,467 @@ std::string runVaeDiagnostic(
     if (output == nullptr) {
 
         result
-            << "FAIL: VAE output tensor not found.";
+            << "FAIL: CPU VAE output is null.";
+
+    } else {
+
+        result
+            << "CPU VAE output shape: "
+            << formatShape(output)
+            << "\n";
+
+        result
+            << "CPU VAE output elements: "
+            << output->elementSize()
+            << "\n\n";
+
+
+        if (errorCode == 0) {
+
+            float* outputHost =
+                output->host<float>();
+
+            if (outputHost != nullptr) {
+
+                result
+                    << "CPU output sample: "
+                    << outputHost[0]
+                    << ", "
+                    << outputHost[1]
+                    << ", "
+                    << outputHost[2]
+                    << ", "
+                    << outputHost[3]
+                    << "\n\n";
+            }
+
+            result
+                << "PASS: VAE executes on CPU.\n";
+
+        } else {
+
+            result
+                << "FAIL: VAE CPU inference error.\n";
+        }
+    }
+
+
+    interpreter->releaseSession(
+        session
+    );
+
+    destroyInterpreter(
+        interpreter
+    );
+
+
+    result
+        << "\nCPU VAE test finished.";
+
+    return result.str();
+}
+
+
+// ============================================================
+// VAE OPENCL MAP TEST
+// ============================================================
+
+std::string runVaeOpenClMapTest(
+        const std::string& modelPath) {
+
+    std::ostringstream result;
+
+    result
+        << "\n\n"
+        << "========================================\n"
+        << "VAE OPENCL MAP TEST\n"
+        << "========================================\n\n";
+
+    result
+        << "Testing MNN OpenCL input map/unmap path.\n";
+
+    result
+        << "This avoids copyFromHostTensor().\n\n";
+
+
+    // --------------------------------------------------------
+    // INTERPRETER
+    // --------------------------------------------------------
+
+    result
+        << "Creating OpenCL interpreter...\n";
+
+    MNN::Interpreter* interpreter =
+        MNN::Interpreter::createFromFile(
+            modelPath.c_str()
+        );
+
+    if (interpreter == nullptr) {
+
+        result
+            << "FAIL: OpenCL VAE interpreter creation failed.";
+
+        return result.str();
+    }
+
+    result
+        << "OpenCL interpreter created.\n";
+
+
+    // --------------------------------------------------------
+    // SESSION
+    // --------------------------------------------------------
+
+    MNN::Session* session = nullptr;
+
+    if (!createSession(
+            interpreter,
+            session,
+            true,
+            4)) {
+
+        result
+            << "FAIL: OpenCL VAE session creation failed.";
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+    result
+        << "OpenCL session created.\n\n";
+
+
+    // --------------------------------------------------------
+    // INPUT
+    // --------------------------------------------------------
+
+    MNN::Tensor* input =
+        interpreter->getSessionInput(
+            session,
+            "latent"
+        );
+
+    if (input == nullptr) {
+
+        input =
+            interpreter->getSessionInput(
+                session,
+                nullptr
+            );
+    }
+
+
+    if (input == nullptr) {
+
+        result
+            << "FAIL: OpenCL VAE latent input not found.";
+
+        interpreter->releaseSession(
+            session
+        );
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+
+    result
+        << "Original shape: "
+        << formatShape(input)
+        << "\n";
+
+    result
+        << "Original elements: "
+        << input->elementSize()
+        << "\n";
+
+    result
+        << "Original type code: "
+        << static_cast<int>(
+            input->getType().code
+        )
+        << "\n";
+
+    result
+        << "Original bytes: "
+        << static_cast<int>(
+            input->getType().bytes()
+        )
+        << "\n";
+
+    result
+        << "Original dimension type: "
+        << dimensionTypeName(
+            input->getDimensionType()
+        )
+        << "\n";
+
+    result
+        << "Original device ID: "
+        << input->deviceId()
+        << "\n\n";
+
+
+    // --------------------------------------------------------
+    // RESIZE
+    // --------------------------------------------------------
+
+    std::vector<int> expectedShape = {
+        1, 32, 16, 16
+    };
+
+
+    result
+        << "Applying explicit VAE tensor resize...\n";
+
+    interpreter->resizeTensor(
+        input,
+        expectedShape
+    );
+
+    result
+        << "Calling resizeSession()...\n";
+
+    interpreter->resizeSession(
+        session
+    );
+
+    result
+        << "resizeSession() completed.\n\n";
+
+
+    result
+        << "Resized shape: "
+        << formatShape(input)
+        << "\n";
+
+    result
+        << "Resized elements: "
+        << input->elementSize()
+        << "\n";
+
+    result
+        << "Resized type code: "
+        << static_cast<int>(
+            input->getType().code
+        )
+        << "\n";
+
+    result
+        << "Resized bytes: "
+        << static_cast<int>(
+            input->getType().bytes()
+        )
+        << "\n";
+
+    result
+        << "Resized dimension type: "
+        << dimensionTypeName(
+            input->getDimensionType()
+        )
+        << "\n";
+
+    result
+        << "Resized device ID: "
+        << input->deviceId()
+        << "\n\n";
+
+
+    // --------------------------------------------------------
+    // WAIT
+    // --------------------------------------------------------
+
+    result
+        << "Testing OpenCL input wait/write state...\n";
+
+    int waitResult =
+        input->wait(
+            MNN::Tensor::MAP_TENSOR_WRITE,
+            true
+        );
+
+    result
+        << "Input wait(MAP_TENSOR_WRITE, true): "
+        << waitResult
+        << "\n\n";
+
+
+    // --------------------------------------------------------
+    // MAP
+    // --------------------------------------------------------
+
+    result
+        << "Mapping OpenCL input for WRITE...\n";
+
+    MNN::Tensor::DimensionType dimensionType =
+        input->getDimensionType();
+
+    void* mapped =
+        input->map(
+            MNN::Tensor::MAP_TENSOR_WRITE,
+            dimensionType
+        );
+
+
+    if (mapped == nullptr) {
+
+        result
+            << "FAIL: MNN could not map VAE input tensor for WRITE.\n\n";
+
+        result
+            << "This means the OpenCL backend did not expose a writable "
+            << "mapped input buffer for this session.\n";
+
+        interpreter->releaseSession(
+            session
+        );
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+
+    result
+        << "PASS: OpenCL input mapped successfully.\n";
+
+
+    // --------------------------------------------------------
+    // FILL MAPPED BUFFER
+    // --------------------------------------------------------
+
+    float* data =
+        static_cast<float*>(mapped);
+
+
+    if (data == nullptr) {
+
+        input->unmap(
+            MNN::Tensor::MAP_TENSOR_WRITE,
+            dimensionType,
+            mapped
+        );
+
+        result
+            << "FAIL: Mapped pointer is null.";
+
+        interpreter->releaseSession(
+            session
+        );
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+
+    const int elements =
+        input->elementSize();
+
+
+    for (int i = 0;
+         i < elements;
+         ++i) {
+
+        data[i] =
+            -0.05f +
+            0.000390625f *
+            static_cast<float>(
+                i % 256
+            );
+    }
+
+
+    result
+        << "Mapped latent sample: "
+        << data[0]
+        << ", "
+        << data[1]
+        << ", "
+        << data[2]
+        << ", "
+        << data[3]
+        << "\n";
+
+
+    // --------------------------------------------------------
+    // UNMAP
+    // --------------------------------------------------------
+
+    result
+        << "Unmapping OpenCL input...\n";
+
+    input->unmap(
+        MNN::Tensor::MAP_TENSOR_WRITE,
+        dimensionType,
+        mapped
+    );
+
+    result
+        << "OpenCL input unmap completed.\n\n";
+
+
+    // --------------------------------------------------------
+    // RUN
+    // --------------------------------------------------------
+
+    result
+        << "Running OpenCL VAE inference...\n";
+
+    auto start =
+        std::chrono::steady_clock::now();
+
+    int errorCode =
+        interpreter->runSession(
+            session
+        );
+
+    auto end =
+        std::chrono::steady_clock::now();
+
+
+    double elapsed =
+        std::chrono::duration<double, std::milli>(
+            end - start
+        ).count();
+
+
+    result
+        << "OpenCL VAE time: "
+        << elapsed
+        << " ms\n";
+
+    result
+        << "OpenCL VAE error code: "
+        << errorCode
+        << "\n\n";
+
+
+    // --------------------------------------------------------
+    // OUTPUT
+    // --------------------------------------------------------
+
+    MNN::Tensor* output =
+        interpreter->getSessionOutput(
+            session,
+            nullptr
+        );
+
+
+    if (output == nullptr) {
+
+        result
+            << "FAIL: OpenCL VAE output is null.";
 
         interpreter->releaseSession(
             session
@@ -1650,92 +1470,204 @@ std::string runVaeDiagnostic(
         << formatShape(output)
         << "\n";
 
-
     result
         << "Output elements: "
         << output->elementSize()
         << "\n";
 
 
-    result
-        << "Output type code: "
-        << output->getType().code
-        << "\n";
-
-
-    result
-        << "Output bytes: "
-        << output->getType().bytes()
-        << "\n";
-
-
-    result
-        << "Output dimension type: "
-        << dimensionTypeName(
-            output->getDimensionType()
-        )
-        << "\n";
-
-
     // --------------------------------------------------------
-    // OUTPUT HOST COPY
+    // OUTPUT MAP
     // --------------------------------------------------------
 
-    MNN::Tensor* outputHost =
-        new MNN::Tensor(
-            output,
+    result
+        << "\nMapping OpenCL output for READ...\n";
+
+
+    int outputWait =
+        output->wait(
+            MNN::Tensor::MAP_TENSOR_READ,
+            true
+        );
+
+
+    result
+        << "Output wait result: "
+        << outputWait
+        << "\n";
+
+
+    void* outputMapped =
+        output->map(
+            MNN::Tensor::MAP_TENSOR_READ,
             output->getDimensionType()
         );
 
 
-    bool outputCopied =
-        output->copyToHostTensor(
-            outputHost
-        );
+    if (outputMapped != nullptr) {
 
-
-    if (outputCopied &&
-        outputHost->host<float>() != nullptr &&
-        outputHost->elementSize() >= 4) {
-
-        float* data =
-            outputHost->host<float>();
-
+        float* outputData =
+            static_cast<float*>(
+                outputMapped
+            );
 
         result
-            << "\nOutput sample: "
-            << data[0]
+            << "Output sample: "
+            << outputData[0]
             << ", "
-            << data[1]
+            << outputData[1]
             << ", "
-            << data[2]
+            << outputData[2]
             << ", "
-            << data[3]
+            << outputData[3]
             << "\n";
+
+
+        output->unmap(
+            MNN::Tensor::MAP_TENSOR_READ,
+            output->getDimensionType(),
+            outputMapped
+        );
+
+        result
+            << "Output unmap completed.\n";
 
     } else {
 
         result
-            << "\nOutput host copy failed "
-               "or output is not float32.\n";
+            << "WARNING: Could not map OpenCL output.\n";
+
+        /*
+         * Try the official device -> host method.
+         */
+        MNN::Tensor* hostOutput =
+            MNN::Tensor::createHostTensorFromDevice(
+                output,
+                true
+            );
+
+        if (hostOutput != nullptr) {
+
+            float* outputData =
+                hostOutput->host<float>();
+
+            if (outputData != nullptr) {
+
+                result
+                    << "Host output sample: "
+                    << outputData[0]
+                    << ", "
+                    << outputData[1]
+                    << ", "
+                    << outputData[2]
+                    << ", "
+                    << outputData[3]
+                    << "\n";
+            }
+
+            MNN::Tensor::destroy(
+                hostOutput
+            );
+        }
     }
 
 
-    delete outputHost;
-
-
     result
-        << "\nPASS: VAE inference executed successfully.";
+        << "\n";
+
+
+    if (errorCode == 0) {
+
+        result
+            << "PASS: VAE executed successfully on OpenCL.\n";
+
+    } else {
+
+        result
+            << "FAIL: OpenCL VAE inference error.\n";
+    }
 
 
     interpreter->releaseSession(
         session
     );
 
-
     destroyInterpreter(
         interpreter
     );
+
+
+    result
+        << "\nOpenCL VAE test finished.";
+
+    return result.str();
+}
+
+
+// ============================================================
+// COMPLETE VAE DIAGNOSTIC
+// ============================================================
+
+std::string runVaeDiagnostic(
+        const std::string& modelPath,
+        const std::string& cachePath,
+        bool preferOpenCl) {
+
+    (void)cachePath;
+
+    std::ostringstream result;
+
+    result
+        << "SANA 0.6B / 512 VAE DECODER TEST\n\n";
+
+    result
+        << "Model file:\n"
+        << modelPath
+        << "\n\n";
+
+
+    long long fileSize =
+        getFileSize(modelPath);
+
+
+    if (fileSize < 0) {
+
+        result
+            << "FAIL: VAE file does not exist.";
+
+        return result.str();
+    }
+
+
+    result
+        << "File size: "
+        << fileSize
+        << " bytes\n\n";
+
+
+    /*
+     * Always perform the CPU direct-host isolation test.
+     *
+     * This tells us whether the exported VAE itself can execute
+     * without OpenCL.
+     */
+    result
+        << runVaeCpuIsolationTest(
+            modelPath
+        );
+
+
+    /*
+     * Only perform the OpenCL map test when OpenCL was requested.
+     */
+    if (preferOpenCl) {
+
+        result
+            << "\n\n"
+            << runVaeOpenClMapTest(
+                modelPath
+            );
+    }
 
 
     return result.str();
@@ -1743,7 +1675,7 @@ std::string runVaeDiagnostic(
 
 
 // ============================================================
-// COMBINED TEST
+// COMBINED MODEL DIAGNOSTIC
 // ============================================================
 
 std::string runCombinedDiagnostic(
@@ -1753,6 +1685,11 @@ std::string runCombinedDiagnostic(
         bool preferOpenCl) {
 
     std::ostringstream result;
+
+    result
+        << "========================================\n"
+        << "SANA 0.6B / 512 MODEL DIAGNOSTIC\n"
+        << "========================================\n\n";
 
 
     result
@@ -1765,8 +1702,9 @@ std::string runCombinedDiagnostic(
 
     result
         << "\n\n"
-        << "========================================"
-        << "\n\n";
+        << "========================================\n"
+        << "VAE DECODER DIAGNOSTIC\n"
+        << "========================================\n";
 
 
     result
@@ -1780,7 +1718,126 @@ std::string runCombinedDiagnostic(
     return result.str();
 }
 
-} // namespace
+
+// ============================================================
+// COPY ASSET TO CACHE
+// ============================================================
+
+bool copyAssetToFile(
+        AAssetManager* assetManager,
+        const std::string& assetName,
+        const std::string& destination) {
+
+    if (assetManager == nullptr) {
+
+        LOGE(
+            "AssetManager is null"
+        );
+
+        return false;
+    }
+
+
+    AAsset* asset =
+        AAssetManager_open(
+            assetManager,
+            assetName.c_str(),
+            AASSET_MODE_STREAMING
+        );
+
+
+    if (asset == nullptr) {
+
+        LOGE(
+            "Could not open asset: %s",
+            assetName.c_str()
+        );
+
+        return false;
+    }
+
+
+    FILE* output =
+        std::fopen(
+            destination.c_str(),
+            "wb"
+        );
+
+
+    if (output == nullptr) {
+
+        LOGE(
+            "Could not create destination: %s",
+            destination.c_str()
+        );
+
+        AAsset_close(asset);
+
+        return false;
+    }
+
+
+    constexpr size_t BUFFER_SIZE =
+        1024 * 1024;
+
+
+    std::vector<char> buffer(
+        BUFFER_SIZE
+    );
+
+
+    bool success = true;
+
+
+    while (true) {
+
+        int count =
+            AAsset_read(
+                asset,
+                buffer.data(),
+                static_cast<int>(
+                    buffer.size()
+                )
+            );
+
+
+        if (count < 0) {
+
+            success = false;
+            break;
+        }
+
+
+        if (count == 0) {
+            break;
+        }
+
+
+        size_t written =
+            std::fwrite(
+                buffer.data(),
+                1,
+                static_cast<size_t>(count),
+                output
+            );
+
+
+        if (written !=
+            static_cast<size_t>(count)) {
+
+            success = false;
+            break;
+        }
+    }
+
+
+    std::fclose(output);
+
+    AAsset_close(asset);
+
+
+    return success;
+}
 
 
 // ============================================================
@@ -1791,8 +1848,8 @@ extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_sana_android_engine_NativeSana_nativeInitialize(
         JNIEnv* env,
-        jobject,
-        jobject assetManager,
+        jobject /* thiz */,
+        jobject assetManagerObject,
         jstring modelAsset,
         jstring cachePath,
         jboolean preferOpenCl,
@@ -1806,24 +1863,23 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
     releaseGlobalLocked();
 
 
-    if (assetManager == nullptr ||
-        modelAsset == nullptr) {
+    if (assetManagerObject == nullptr) {
 
         gStatus =
-            "Invalid initialization arguments";
+            "AssetManager is null";
 
         return JNI_FALSE;
     }
 
 
-    AAssetManager* manager =
+    AAssetManager* assetManager =
         AAssetManager_fromJava(
             env,
-            assetManager
+            assetManagerObject
         );
 
 
-    if (manager == nullptr) {
+    if (assetManager == nullptr) {
 
         gStatus =
             "Could not obtain AssetManager";
@@ -1832,7 +1888,7 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
     }
 
 
-    std::string assetPath =
+    std::string assetName =
         jstringToString(
             env,
             modelAsset
@@ -1846,82 +1902,65 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
         );
 
 
-    // --------------------------------------------------------
-    // OPEN ASSET
-    // --------------------------------------------------------
-
-    AAsset* asset =
-        AAssetManager_open(
-            manager,
-            assetPath.c_str(),
-            AASSET_MODE_STREAMING
-        );
-
-
-    if (asset == nullptr) {
+    if (assetName.empty()) {
 
         gStatus =
-            "Could not open model asset: " +
-            assetPath;
+            "Model asset path is empty";
 
         return JNI_FALSE;
     }
 
 
-    // --------------------------------------------------------
-    // CACHE MODEL
-    // --------------------------------------------------------
+    if (cache.empty()) {
+
+        gStatus =
+            "Cache path is empty";
+
+        return JNI_FALSE;
+    }
+
 
     std::string modelPath =
         cache +
         "/sana_model.mnn";
 
 
-    FILE* output =
-        std::fopen(
-            modelPath.c_str(),
-            "wb"
-        );
+    LOGI(
+        "Copying Sana model asset: %s",
+        assetName.c_str()
+    );
 
 
-    if (output == nullptr) {
-
-        AAsset_close(asset);
+    if (!copyAssetToFile(
+            assetManager,
+            assetName,
+            modelPath
+        )) {
 
         gStatus =
-            "Could not create cached model";
+            "Failed to copy Sana model asset";
 
         return JNI_FALSE;
     }
 
 
-    char buffer[
-        1024 * 1024
-    ];
+    long long size =
+        getFileSize(modelPath);
 
 
-    int bytesRead = 0;
+    if (size <= 0) {
 
+        gStatus =
+            "Copied model file is empty";
 
-    while ((bytesRead =
-            AAsset_read(
-                asset,
-                buffer,
-                sizeof(buffer)
-            )) > 0) {
-
-        std::fwrite(
-            buffer,
-            1,
-            bytesRead,
-            output
-        );
+        return JNI_FALSE;
     }
 
 
-    std::fclose(output);
-
-    AAsset_close(asset);
+    LOGI(
+        "Sana model copied. Size=%lld",
+        size
+    );
 
 
     // --------------------------------------------------------
@@ -1943,6 +1982,10 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
     }
 
 
+    // --------------------------------------------------------
+    // CREATE SESSION
+    // --------------------------------------------------------
+
     int threads =
         std::max(
             1,
@@ -1955,24 +1998,17 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
         );
 
 
-    // --------------------------------------------------------
-    // CREATE SESSION
-    // --------------------------------------------------------
-
     if (!createSession(
             gInterpreter,
             gSession,
             preferOpenCl == JNI_TRUE,
-            threads)) {
-
-        MNN::Interpreter::destroy(
-            gInterpreter
-        );
-
-        gInterpreter = nullptr;
+            threads
+        )) {
 
         gStatus =
             "MNN session creation failed";
+
+        releaseGlobalLocked();
 
         return JNI_FALSE;
     }
@@ -1981,20 +2017,20 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
     gInitialized = true;
 
 
-    gBackend =
-        backendName(
-            preferOpenCl == JNI_TRUE
-        );
+    if (preferOpenCl == JNI_TRUE) {
+
+        gBackend =
+            "OpenCL / FP16";
+
+    } else {
+
+        gBackend =
+            "CPU";
+    }
 
 
     gStatus =
-        "Sana MNN engine initialized";
-
-
-    LOGI(
-        "Sana initialized: %s",
-        gBackend.c_str()
-    );
+        "Sana MNN model initialized";
 
 
     return JNI_TRUE;
@@ -2008,13 +2044,12 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
-        JNIEnv*,
-        jobject) {
+        JNIEnv* /* env */,
+        jobject /* thiz */) {
 
     std::lock_guard<std::mutex> lock(
         gMutex
     );
-
 
     return gInitialized
         ? JNI_TRUE
@@ -2030,12 +2065,11 @@ extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeGetBackend(
         JNIEnv* env,
-        jobject) {
+        jobject /* thiz */) {
 
     std::lock_guard<std::mutex> lock(
         gMutex
     );
-
 
     return env->NewStringUTF(
         gBackend.c_str()
@@ -2051,12 +2085,11 @@ extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeGetStatus(
         JNIEnv* env,
-        jobject) {
+        jobject /* thiz */) {
 
     std::lock_guard<std::mutex> lock(
         gMutex
     );
-
 
     return env->NewStringUTF(
         gStatus.c_str()
@@ -2071,20 +2104,14 @@ Java_com_sana_android_engine_NativeSana_nativeGetStatus(
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_sana_android_engine_NativeSana_nativeRelease(
-        JNIEnv*,
-        jobject) {
+        JNIEnv* /* env */,
+        jobject /* thiz */) {
 
     std::lock_guard<std::mutex> lock(
         gMutex
     );
 
-
     releaseGlobalLocked();
-
-
-    LOGI(
-        "Sana engine released"
-    );
 }
 
 
@@ -2096,7 +2123,7 @@ extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
         JNIEnv* env,
-        jobject,
+        jobject /* thiz */,
         jstring transformerPath,
         jstring cachePath,
         jboolean preferOpenCl) {
@@ -2106,7 +2133,6 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
             env,
             transformerPath
         );
-
 
     std::string cache =
         jstringToString(
@@ -2137,7 +2163,7 @@ extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeTestVae(
         JNIEnv* env,
-        jobject,
+        jobject /* thiz */,
         jstring vaePath,
         jstring cachePath,
         jboolean preferOpenCl) {
@@ -2147,7 +2173,6 @@ Java_com_sana_android_engine_NativeSana_nativeTestVae(
             env,
             vaePath
         );
-
 
     std::string cache =
         jstringToString(
@@ -2178,7 +2203,7 @@ extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeTestModels(
         JNIEnv* env,
-        jobject,
+        jobject /* thiz */,
         jstring transformerPath,
         jstring vaePath,
         jstring cachePath,
@@ -2190,13 +2215,11 @@ Java_com_sana_android_engine_NativeSana_nativeTestModels(
             transformerPath
         );
 
-
     std::string vae =
         jstringToString(
             env,
             vaePath
         );
-
 
     std::string cache =
         jstringToString(
@@ -2218,3 +2241,5 @@ Java_com_sana_android_engine_NativeSana_nativeTestModels(
         result.c_str()
     );
 }
+
+} // namespace
