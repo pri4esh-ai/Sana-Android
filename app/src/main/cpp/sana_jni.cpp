@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <exception>
 #include <map>
 #include <memory>
@@ -20,7 +19,7 @@
 
 
 // ============================================================
-// Logging
+// LOGGING
 // ============================================================
 
 #define LOG_TAG "SanaNative"
@@ -33,7 +32,7 @@
 
 
 // ============================================================
-// Utility
+// UTILITIES
 // ============================================================
 
 static std::string shapeString(
@@ -88,7 +87,7 @@ static std::string jstringToString(
 
 
 // ============================================================
-// Persistent Sana Engine
+// PERSISTENT SANA ENGINE
 // ============================================================
 
 class SanaEngine {
@@ -309,10 +308,9 @@ static SanaEngine gEngine;
 
 
 // ============================================================
-// Generic Transformer input preparation
+// TRANSFORMER INPUT PREPARATION
 //
-// This function is intentionally preserved for the Transformer
-// diagnostic that already works.
+// PRESERVED FOR THE WORKING TRANSFORMER TEST.
 // ============================================================
 
 static bool prepareInput(
@@ -412,9 +410,9 @@ static bool prepareInput(
 
 
 // ============================================================
-// Generic single-model diagnostic
+// GENERIC MODEL DIAGNOSTIC
 //
-// This preserves the Transformer diagnostic behavior.
+// PRESERVED FOR TRANSFORMER.
 // ============================================================
 
 static std::string testSingleModel(
@@ -434,10 +432,6 @@ static std::string testSingleModel(
             << "\n"
             << "===\n";
 
-
-    // --------------------------------------------------------
-    // Check model file
-    // --------------------------------------------------------
 
     struct stat fileInfo {};
 
@@ -470,10 +464,6 @@ static std::string testSingleModel(
             << " bytes\n\n";
 
 
-    // --------------------------------------------------------
-    // Create interpreter
-    // --------------------------------------------------------
-
     std::shared_ptr<MNN::Interpreter>
             interpreter(
                     MNN::Interpreter::createFromFile(
@@ -494,10 +484,6 @@ static std::string testSingleModel(
     result
             << "Interpreter created.\n\n";
 
-
-    // --------------------------------------------------------
-    // Session configuration
-    // --------------------------------------------------------
 
     MNN::ScheduleConfig config{};
 
@@ -562,18 +548,10 @@ static std::string testSingleModel(
     }
 
 
-    // --------------------------------------------------------
-    // Prepare session
-    // --------------------------------------------------------
-
     interpreter->resizeSession(
             session
     );
 
-
-    // --------------------------------------------------------
-    // Get inputs
-    // --------------------------------------------------------
 
     std::map<std::string, MNN::Tensor*> inputs =
             interpreter->getSessionInputAll(
@@ -599,10 +577,6 @@ static std::string testSingleModel(
     }
 
 
-    // --------------------------------------------------------
-    // Print inputs
-    // --------------------------------------------------------
-
     for (const auto& pair : inputs) {
 
         const std::string& name =
@@ -620,13 +594,11 @@ static std::string testSingleModel(
 
         if (tensor) {
 
-            const std::vector<int> shape =
-                    tensor->shape();
-
-
             result
                     << "Shape: "
-                    << shapeString(shape)
+                    << shapeString(
+                            tensor->shape()
+                    )
                     << "\n";
 
 
@@ -637,10 +609,6 @@ static std::string testSingleModel(
         }
     }
 
-
-    // --------------------------------------------------------
-    // Prepare inputs
-    // --------------------------------------------------------
 
     for (const auto& pair : inputs) {
 
@@ -663,10 +631,6 @@ static std::string testSingleModel(
         }
     }
 
-
-    // --------------------------------------------------------
-    // Run inference
-    // --------------------------------------------------------
 
     result
             << "\nRunning inference...\n";
@@ -706,7 +670,9 @@ static std::string testSingleModel(
             << "\n";
 
 
-    if (errorCode != MNN::NO_ERROR) {
+    if (
+            errorCode != MNN::NO_ERROR
+    ) {
 
         interpreter->releaseSession(
                 session
@@ -718,10 +684,6 @@ static std::string testSingleModel(
         return result.str();
     }
 
-
-    // --------------------------------------------------------
-    // Outputs
-    // --------------------------------------------------------
 
     std::map<std::string, MNN::Tensor*> outputs =
             interpreter->getSessionOutputAll(
@@ -752,13 +714,11 @@ static std::string testSingleModel(
 
         if (tensor) {
 
-            const std::vector<int> shape =
-                    tensor->shape();
-
-
             result
                     << "Shape: "
-                    << shapeString(shape)
+                    << shapeString(
+                            tensor->shape()
+                    )
                     << "\n";
 
 
@@ -769,10 +729,6 @@ static std::string testSingleModel(
         }
     }
 
-
-    // --------------------------------------------------------
-    // Release
-    // --------------------------------------------------------
 
     interpreter->releaseSession(
             session
@@ -789,28 +745,23 @@ static std::string testSingleModel(
 
 
 // ============================================================
-// VAE-ONLY DIAGNOSTIC
+// VAE DIAGNOSTIC
 //
-// IMPORTANT:
-// This is deliberately separate from the generic Transformer
-// test.
+// NEW APPROACH:
 //
-// Explicit sequence:
+// DO NOT use copyFromHostTensor() for the VAE input.
 //
-// 1. Create interpreter
-// 2. Create OpenCL/FP16 session
-// 3. Get latent input
-// 4. Explicitly resize latent to [1,32,16,16]
-// 5. Explicitly resize session
-// 6. Create HOST tensor
-// 7. Fill deterministic latent data
-// 8. copyFromHostTensor()
-// 9. runSession()
-// 10. copy output back to HOST
+// Instead:
 //
-// MNN documents resizeTensor + resizeSession before execution
-// when tensor dimensions are specified/changed, and recommends
-// copyFromHostTensor for device backends.
+// resizeTensor()
+// resizeSession()
+// getSessionInput()
+// map(MAP_TENSOR_WRITE)
+// write latent directly
+// unmap(...)
+// runSession()
+//
+// This follows MNN's documented device-tensor mapping path.
 // ============================================================
 
 static std::string testVaeOnly(
@@ -830,7 +781,7 @@ static std::string testVaeOnly(
 
 
     // --------------------------------------------------------
-    // Check file
+    // File
     // --------------------------------------------------------
 
     struct stat fileInfo {};
@@ -865,7 +816,7 @@ static std::string testVaeOnly(
 
 
     // --------------------------------------------------------
-    // Create interpreter
+    // Interpreter
     // --------------------------------------------------------
 
     std::shared_ptr<MNN::Interpreter>
@@ -890,7 +841,7 @@ static std::string testVaeOnly(
 
 
     // --------------------------------------------------------
-    // Backend
+    // OpenCL / CPU
     // --------------------------------------------------------
 
     MNN::ScheduleConfig config{};
@@ -957,7 +908,7 @@ static std::string testVaeOnly(
 
 
     // --------------------------------------------------------
-    // Get latent input BEFORE resizing
+    // Find latent
     // --------------------------------------------------------
 
     MNN::Tensor* latentInput =
@@ -969,18 +920,11 @@ static std::string testVaeOnly(
 
     if (!latentInput) {
 
-        // Fallback for models where the input name is not
-        // exactly "latent".
-        std::map<std::string, MNN::Tensor*> inputs =
-                interpreter->getSessionInputAll(
-                        session
+        latentInput =
+                interpreter->getSessionInput(
+                        session,
+                        nullptr
                 );
-
-        if (!inputs.empty()) {
-
-            latentInput =
-                    inputs.begin()->second;
-        }
     }
 
 
@@ -1012,17 +956,35 @@ static std::string testVaeOnly(
     result
             << "Original elements: "
             << latentInput->elementSize()
+            << "\n";
+
+
+    // --------------------------------------------------------
+    // Print original tensor properties
+    // --------------------------------------------------------
+
+    result
+            << "Original tensor type code: "
+            << latentInput->getType().code
+            << "\n";
+
+
+    result
+            << "Original tensor bytes: "
+            << latentInput->getType().bytes()
+            << "\n";
+
+
+    result
+            << "Original device ID: "
+            << static_cast<unsigned long long>(
+                    latentInput->deviceId()
+            )
             << "\n\n";
 
 
     // --------------------------------------------------------
-    // Explicit Sana latent shape
-    //
-    // Sana 0.6B 512x512:
-    //
-    // latent = [1,32,16,16]
-    //
-    // This is exactly 8192 elements.
+    // Sana latent
     // --------------------------------------------------------
 
     const std::vector<int> latentShape = {
@@ -1034,7 +996,7 @@ static std::string testVaeOnly(
 
 
     LOGI(
-            "VAE resizing latent input to [1,32,16,16]"
+            "VAE resizeTensor -> [1,32,16,16]"
     );
 
 
@@ -1045,10 +1007,7 @@ static std::string testVaeOnly(
 
 
     // --------------------------------------------------------
-    // CRITICAL:
-    //
-    // resizeSession MUST happen after resizeTensor and before
-    // allocating/copying the host tensor.
+    // CRITICAL
     // --------------------------------------------------------
 
     interpreter->resizeSession(
@@ -1057,10 +1016,7 @@ static std::string testVaeOnly(
 
 
     // --------------------------------------------------------
-    // Re-fetch input after resizeSession.
-    //
-    // MNN may update/recreate internal tensor resources during
-    // resizeSession.
+    // Re-fetch after resize
     // --------------------------------------------------------
 
     latentInput =
@@ -1072,16 +1028,11 @@ static std::string testVaeOnly(
 
     if (!latentInput) {
 
-        std::map<std::string, MNN::Tensor*> inputs =
-                interpreter->getSessionInputAll(
-                        session
+        latentInput =
+                interpreter->getSessionInput(
+                        session,
+                        nullptr
                 );
-
-        if (!inputs.empty()) {
-
-            latentInput =
-                    inputs.begin()->second;
-        }
     }
 
 
@@ -1092,7 +1043,7 @@ static std::string testVaeOnly(
         );
 
         result
-                << "FAIL: Latent input disappeared after resizeSession.";
+                << "FAIL: Latent disappeared after resizeSession.";
 
         return result.str();
     }
@@ -1104,7 +1055,9 @@ static std::string testVaeOnly(
 
     result
             << "Resized shape: "
-            << shapeString(resizedShape)
+            << shapeString(
+                    resizedShape
+            )
             << "\n";
 
 
@@ -1113,6 +1066,30 @@ static std::string testVaeOnly(
             << latentInput->elementSize()
             << "\n";
 
+
+    result
+            << "Resized tensor type code: "
+            << latentInput->getType().code
+            << "\n";
+
+
+    result
+            << "Resized tensor bytes: "
+            << latentInput->getType().bytes()
+            << "\n";
+
+
+    result
+            << "Resized device ID: "
+            << static_cast<unsigned long long>(
+                    latentInput->deviceId()
+            )
+            << "\n";
+
+
+    // --------------------------------------------------------
+    // Validate shape
+    // --------------------------------------------------------
 
     if (
             resizedShape.size() != 4 ||
@@ -1149,72 +1126,83 @@ static std::string testVaeOnly(
 
 
     // --------------------------------------------------------
-    // Create explicit HOST tensor.
-    //
-    // CAFFE = NCHW layout, which matches the exported ONNX
-    // Sana latent tensor.
+    // MAP DEVICE TENSOR
     // --------------------------------------------------------
 
-    MNN::Tensor hostLatent(
-            latentInput,
-            MNN::Tensor::CAFFE
-    );
-
-
-    const size_t latentElements =
-            hostLatent.elementSize();
-
-
     result
-            << "Host latent elements: "
-            << latentElements
-            << "\n";
+            << "\nMapping OpenCL input tensor for write...\n";
 
 
-    if (
-            latentElements != 8192
-    ) {
+    void* mappedMemory =
+            latentInput->map(
+                    MNN::Tensor::MAP_TENSOR_WRITE,
+                    latentInput->getDimensionType()
+            );
+
+
+    if (!mappedMemory) {
 
         interpreter->releaseSession(
                 session
         );
 
         result
-                << "FAIL: Host latent allocation has incorrect size.";
+                << "FAIL: MNN could not map VAE input tensor for WRITE.";
 
         return result.str();
     }
 
 
+    result
+            << "Tensor map: OK\n";
+
+
+    // --------------------------------------------------------
+    // IMPORTANT
+    //
+    // map() gives the backend-controlled memory representation.
+    //
+    // For the diagnostic we assume float data because the
+    // exported Sana latent input is FP32/FP16-compatible.
+    // --------------------------------------------------------
+
     float* latentData =
-            hostLatent.host<float>();
+            static_cast<float*>(
+                    mappedMemory
+            );
 
 
     if (!latentData) {
 
+        latentInput->unmap(
+                MNN::Tensor::MAP_TENSOR_WRITE,
+                latentInput->getDimensionType(),
+                mappedMemory
+        );
+
+
         interpreter->releaseSession(
                 session
         );
 
         result
-                << "FAIL: Host latent buffer allocation failed.";
+                << "FAIL: Mapped VAE tensor pointer is null.";
 
         return result.str();
     }
 
 
     // --------------------------------------------------------
-    // Deterministic diagnostic latent.
-    //
-    // We intentionally avoid random data here.
-    //
-    // A small structured signal is easier to reproduce and
-    // debug across devices.
+    // Fill deterministic latent
     // --------------------------------------------------------
+
+    const size_t elementCount =
+            8192;
+
 
     for (
             size_t i = 0;
-            i < latentElements;
+            i < elementCount;
             ++i
     ) {
 
@@ -1227,10 +1215,6 @@ static std::string testVaeOnly(
                 normalized * 0.05f;
     }
 
-
-    // --------------------------------------------------------
-    // Show a few values.
-    // --------------------------------------------------------
 
     result
             << "Latent sample: "
@@ -1245,43 +1229,22 @@ static std::string testVaeOnly(
 
 
     // --------------------------------------------------------
-    // Copy HOST -> DEVICE.
-    //
-    // This is the recommended MNN path for OpenCL/device
-    // tensors.
+    // UNMAP
     // --------------------------------------------------------
 
-    const bool copyResult =
-            latentInput->copyFromHostTensor(
-                    &hostLatent
-            );
+    latentInput->unmap(
+            MNN::Tensor::MAP_TENSOR_WRITE,
+            latentInput->getDimensionType(),
+            mappedMemory
+    );
 
 
     result
-            << "Host → device copy: "
-            << (
-                    copyResult
-                    ? "OK"
-                    : "FAILED"
-            )
-            << "\n";
-
-
-    if (!copyResult) {
-
-        interpreter->releaseSession(
-                session
-        );
-
-        result
-                << "FAIL: Unable to copy latent tensor to OpenCL device.";
-
-        return result.str();
-    }
+            << "Tensor unmap: OK\n";
 
 
     // --------------------------------------------------------
-    // Run VAE
+    // RUN
     // --------------------------------------------------------
 
     result
@@ -1322,6 +1285,10 @@ static std::string testVaeOnly(
             << "\n";
 
 
+    // --------------------------------------------------------
+    // Failure
+    // --------------------------------------------------------
+
     if (
             errorCode != MNN::NO_ERROR
     ) {
@@ -1331,14 +1298,14 @@ static std::string testVaeOnly(
         );
 
         result
-                << "FAIL: MNN VAE inference error";
+                << "FAIL: MNN VAE inference error.";
 
         return result.str();
     }
 
 
     // --------------------------------------------------------
-    // Get outputs
+    // Outputs
     // --------------------------------------------------------
 
     std::map<std::string, MNN::Tensor*> outputs =
@@ -1404,52 +1371,16 @@ static std::string testVaeOnly(
                 << "\n";
 
 
-        // ----------------------------------------------------
-        // Copy device output to host.
-        //
-        // This is intentionally done only after successful
-        // inference.
-        // ----------------------------------------------------
-
-        MNN::Tensor hostOutput(
-                output,
-                MNN::Tensor::CAFFE
-        );
-
-
-        const bool outputCopy =
-                output->copyToHostTensor(
-                        &hostOutput
-                );
-
-
         result
-                << "Device → host copy: "
-                << (
-                        outputCopy
-                        ? "OK"
-                        : "FAILED"
-                )
+                << "Type code: "
+                << output->getType().code
                 << "\n";
 
 
-        if (outputCopy) {
-
-            float* outputData =
-                    hostOutput.host<float>();
-
-
-            if (
-                    outputData != nullptr &&
-                    hostOutput.elementSize() > 0
-            ) {
-
-                result
-                        << "Output sample: "
-                        << outputData[0]
-                        << "\n";
-            }
-        }
+        result
+                << "Bytes: "
+                << output->getType().bytes()
+                << "\n";
     }
 
 
@@ -1470,11 +1401,7 @@ static std::string testVaeOnly(
 
 
 // ============================================================
-// Transformer-only diagnostic
-//
-// IMPORTANT:
-// Loads ONLY the Transformer.
-// VAE is completely excluded.
+// TRANSFORMER
 // ============================================================
 
 static std::string testTransformerOnly(
@@ -1493,9 +1420,7 @@ static std::string testTransformerOnly(
 
 
 // ============================================================
-// Combined Transformer + VAE diagnostic
-//
-// Kept for compatibility with the existing Kotlin API.
+// COMBINED TEST
 // ============================================================
 
 static std::string testModels(
@@ -1512,10 +1437,6 @@ static std::string testModels(
             << "SANA MODEL TEST\n"
             << "================\n\n";
 
-
-    // --------------------------------------------------------
-    // Transformer
-    // --------------------------------------------------------
 
     result
             << "TRANSFORMER TEST\n"
@@ -1535,10 +1456,6 @@ static std::string testModels(
             << "\n\n";
 
 
-    // --------------------------------------------------------
-    // VAE
-    // --------------------------------------------------------
-
     result
             << "VAE TEST\n"
             << "--------\n";
@@ -1557,7 +1474,7 @@ static std::string testModels(
 
 
 // ============================================================
-// JNI: nativeInitialize
+// JNI: INITIALIZE
 // ============================================================
 
 extern "C"
@@ -1653,7 +1570,7 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
 
 
 // ============================================================
-// JNI: nativeIsInitialized
+// JNI: IS INITIALIZED
 // ============================================================
 
 extern "C"
@@ -1677,7 +1594,7 @@ Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
 
 
 // ============================================================
-// JNI: nativeGetBackend
+// JNI: BACKEND
 // ============================================================
 
 extern "C"
@@ -1706,7 +1623,7 @@ Java_com_sana_android_engine_NativeSana_nativeGetBackend(
 
 
 // ============================================================
-// JNI: nativeGetStatus
+// JNI: STATUS
 // ============================================================
 
 extern "C"
@@ -1735,7 +1652,7 @@ Java_com_sana_android_engine_NativeSana_nativeGetStatus(
 
 
 // ============================================================
-// JNI: nativeRelease
+// JNI: RELEASE
 // ============================================================
 
 extern "C"
@@ -1759,7 +1676,7 @@ Java_com_sana_android_engine_NativeSana_nativeRelease(
 
 
 // ============================================================
-// JNI: nativeTestTransformer
+// JNI: TEST TRANSFORMER
 // ============================================================
 
 extern "C"
@@ -1841,9 +1758,7 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
 
 
 // ============================================================
-// JNI: nativeTestVae
-//
-// This is the NEW corrected VAE diagnostic.
+// JNI: TEST VAE
 // ============================================================
 
 extern "C"
@@ -1925,9 +1840,7 @@ Java_com_sana_android_engine_NativeSana_nativeTestVae(
 
 
 // ============================================================
-// JNI: nativeTestModels
-//
-// Legacy combined diagnostic kept for compatibility.
+// JNI: COMBINED TEST
 // ============================================================
 
 extern "C"
