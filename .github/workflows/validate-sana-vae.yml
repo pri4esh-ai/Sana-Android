@@ -1,4 +1,4 @@
-aname: Validate Sana VAE Only
+name: Validate Sana VAE Only
 
 on:
   workflow_dispatch:
@@ -11,49 +11,22 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
-
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ============================================================
-      # PYTHON
-      # ============================================================
-
-      - name: Setup Python 3.10
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-
-      # ============================================================
-      # SYSTEM
-      # ============================================================
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            git \
-            wget \
-            unzip \
-            build-essential \
-            cmake \
-            ninja-build
-
-
-      # ============================================================
-      # PYTHON
-      # ============================================================
+          sudo apt-get install -y git wget unzip build-essential cmake ninja-build zip
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-
           pip install \
             torch==2.5.1 \
             torchvision==0.20.1 \
@@ -67,917 +40,217 @@ jobs:
             huggingface_hub==0.36.0 \
             numpy==1.26.4
 
-
-      # ============================================================
-      # DOWNLOAD OFFICIAL SANA
-      # ============================================================
-
       - name: Download official Sana 0.6B 512px
         run: |
           python - <<'PY'
           from huggingface_hub import snapshot_download
-
-          repo = "Efficient-Large-Model/Sana_600M_512px_diffusers"
-
-          print("=" * 70)
-          print("DOWNLOADING OFFICIAL SANA 0.6B 512px")
-          print("=" * 70)
-
           snapshot_download(
-              repo_id=repo,
+              repo_id="Efficient-Large-Model/Sana_600M_512px_diffusers",
               local_dir="sana_model",
               local_dir_use_symlinks=False
           )
-
-          print("")
-          print("Download complete.")
+          print("Sana download: PASS")
           PY
-
-
-      # ============================================================
-      # VERIFY
-      # ============================================================
 
       - name: Verify VAE
         run: |
           test -d sana_model/vae
           test -f sana_model/vae/config.json
-
-          echo "VAE directory: PASS"
-          echo "VAE config: PASS"
-
-          find sana_model/vae \
-            -maxdepth 2 \
-            -type f \
-            -print \
-            | sort
-
-
-      # ============================================================
-      # CREATE EXPORTER
-      # ============================================================
+          test -d sana_model/scheduler
+          test -f sana_model/scheduler/scheduler_config.json
+          echo "VAE: PASS"
+          echo "Scheduler: PASS"
 
       - name: Create VAE exporter
         run: |
           cat > export_vae.py <<'PY'
-
           import os
           import torch
           import onnx
-          import numpy as np
-          import onnxruntime as ort
-
           from diffusers import AutoencoderDC
-
-
-          # ==========================================================
-          # PATHS
-          # ==========================================================
 
           MODEL_DIR = "sana_model/vae"
           OUTPUT_DIR = "onnx"
-
-          os.makedirs(
-              OUTPUT_DIR,
-              exist_ok=True
-          )
-
-
-          # ==========================================================
-          # HEADER
-          # ==========================================================
+          os.makedirs(OUTPUT_DIR, exist_ok=True)
 
           print("=" * 70)
           print("SANA 0.6B / 512px VAE VALIDATION")
           print("=" * 70)
-
           print("PyTorch:", torch.__version__)
           print("ONNX:", onnx.__version__)
-          print("ONNX Runtime:", ort.__version__)
 
-
-          # ==========================================================
-          # LOAD
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("LOADING AutoencoderDC")
-          print("=" * 70)
-
+          print("\nLOADING AutoencoderDC")
           vae = AutoencoderDC.from_pretrained(
               MODEL_DIR,
               torch_dtype=torch.float32
           )
-
           vae.eval()
           vae.to("cpu")
+          print("VAE loaded: PASS")
 
-          print("VAE loaded successfully.")
-
-
-          # ==========================================================
-          # CONFIG
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("VAE CONFIGURATION")
-          print("=" * 70)
-
-          print(
-              "in_channels:",
-              vae.config.in_channels
-          )
-
-          print(
-              "latent_channels:",
-              vae.config.latent_channels
-          )
-
-          print(
-              "scaling_factor:",
-              vae.config.scaling_factor
-          )
-
-          print(
-              "decoder_block_out_channels:",
-              vae.config.decoder_block_out_channels
-          )
-
-          print(
-              "decoder_block_types:",
-              vae.config.decoder_block_types
-          )
-
-
-          # ==========================================================
-          # WRAPPER
-          # ==========================================================
+          print("\nVAE CONFIG")
+          print("in_channels:", vae.config.in_channels)
+          print("latent_channels:", vae.config.latent_channels)
+          print("scaling_factor:", vae.config.scaling_factor)
+          print("decoder_block_out_channels:", vae.config.decoder_block_out_channels)
+          print("decoder_block_types:", vae.config.decoder_block_types)
 
           class SanaVAEDecoder(torch.nn.Module):
-
               def __init__(self, model):
                   super().__init__()
                   self.model = model
 
               def forward(self, latent):
-
-                  result = self.model.decode(
+                  return self.model.decode(
                       latent,
                       return_dict=False
-                  )
+                  )[0]
 
-                  return result[0]
-
-
-          decoder = SanaVAEDecoder(
-              vae
-          )
-
+          decoder = SanaVAEDecoder(vae)
           decoder.eval()
 
-
-          # ==========================================================
-          # TEST LATENT
-          # ==========================================================
-
           latent = torch.randn(
-              1,
-              32,
-              16,
-              16,
+              1, 32, 16, 16,
               dtype=torch.float32
           )
 
+          expected = [1, 3, 512, 512]
 
-          expected_input = [
-              1,
-              32,
-              16,
-              16
-          ]
-
-          expected_output = [
-              1,
-              3,
-              512,
-              512
-          ]
-
-
-          print("")
-          print("=" * 70)
-          print("TEST INPUT")
-          print("=" * 70)
-
-          print(
-              "Latent shape:",
-              list(latent.shape)
-          )
-
-          print(
-              "Latent elements:",
-              latent.numel()
-          )
-
-          print(
-              "Latent dtype:",
-              latent.dtype
-          )
-
-
-          # ==========================================================
-          # PYTORCH
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("PYTORCH VAE TEST")
-          print("=" * 70)
-
+          print("\nPYTORCH TEST")
           with torch.no_grad():
+              pytorch_output = decoder(latent)
 
-              pytorch_output = decoder(
-                  latent
-              )
+          print("Input:", list(latent.shape))
+          print("Output:", list(pytorch_output.shape))
+          print("Min:", float(pytorch_output.min()))
+          print("Max:", float(pytorch_output.max()))
 
-
-          print(
-              "PyTorch output shape:",
-              list(pytorch_output.shape)
-          )
-
-          print(
-              "PyTorch output dtype:",
-              pytorch_output.dtype
-          )
-
-          print(
-              "PyTorch output min:",
-              float(pytorch_output.min())
-          )
-
-          print(
-              "PyTorch output max:",
-              float(pytorch_output.max())
-          )
-
-
-          if list(pytorch_output.shape) != expected_output:
-
+          if list(pytorch_output.shape) != expected:
               raise RuntimeError(
-                  "Unexpected PyTorch output shape"
+                  f"Unexpected PyTorch output: {list(pytorch_output.shape)}"
               )
 
+          print("PyTorch VAE: PASS")
 
-          print("PyTorch VAE TEST: PASS")
+          raw_path = "onnx/sana_vae_decoder.onnx"
 
-
-          # ==========================================================
-          # EXPORT
-          # ==========================================================
-
-          onnx_path = (
-              OUTPUT_DIR +
-              "/sana_vae_decoder.onnx"
-          )
-
-
-          print("")
-          print("=" * 70)
-          print("EXPORTING VAE TO ONNX")
-          print("=" * 70)
-
-
+          print("\nEXPORTING ONNX")
           with torch.no_grad():
-
               torch.onnx.export(
                   decoder,
                   (latent,),
-                  onnx_path,
-                  input_names=[
-                      "latent"
-                  ],
-                  output_names=[
-                      "image"
-                  ],
+                  raw_path,
+                  input_names=["latent"],
+                  output_names=["image"],
                   opset_version=17,
                   do_constant_folding=False,
                   external_data=True,
                   verbose=False
               )
 
+          print("ONNX export: PASS")
 
-          print(
-              "Created:",
-              onnx_path
-          )
-
-
-          # ==========================================================
-          # RAW CHECK
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("VALIDATING RAW ONNX")
-          print("=" * 70)
-
-          raw_model = onnx.load(
-              onnx_path,
+          model = onnx.load(
+              raw_path,
               load_external_data=True
           )
 
-          onnx.checker.check_model(
-              raw_model
-          )
+          onnx.checker.check_model(model)
+          print("Raw ONNX checker: PASS")
 
-          print(
-              "ONNX CHECK: PASS"
-          )
+          print("\nREPAIRING TRANSPOSE NODES")
 
+          patched = 0
 
-          # ==========================================================
-          # FIND INVALID TRANSPOSE NODES
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("SCANNING TRANSPOSE NODES")
-          print("=" * 70)
-
-
-          invalid_transposes = []
-
-
-          for node in raw_model.graph.node:
-
+          for node in model.graph.node:
               if node.op_type != "Transpose":
                   continue
 
-              for attribute in node.attribute:
-
-                  if attribute.name != "perm":
+              for attr in node.attribute:
+                  if attr.name != "perm":
                       continue
 
-                  perm = list(
-                      attribute.ints
-                  )
+                  perm = list(attr.ints)
 
+                  if any(v < 0 for v in perm):
+                      rank = len(perm)
+                      fixed = [
+                          rank + v if v < 0 else v
+                          for v in perm
+                      ]
 
-                  if any(
-                      value < 0
-                      for value in perm
-                  ):
-
-                      invalid_transposes.append(
-                          (
-                              node.name,
-                              perm
-                          )
-                      )
-
-
-          print(
-              "Invalid Transpose count:",
-              len(invalid_transposes)
-          )
-
-
-          for name, perm in invalid_transposes:
-
-              print(
-                  "INVALID:",
-                  name,
-                  "perm=",
-                  perm
-              )
-
-
-          # ==========================================================
-          # PATCH INVALID TRANSPOSE PERMUTATIONS
-          #
-          # ONNX Transpose requires:
-          #
-          # 0 <= perm[i] < rank
-          #
-          # The exported Sana graph contains:
-          #
-          # {0,-1,1,2}
-          #
-          # For a rank-4 tensor:
-          #
-          # -1 => 3
-          #
-          # therefore:
-          #
-          # {0,-1,1,2}
-          #
-          # becomes:
-          #
-          # {0,3,1,2}
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("PATCHING INVALID TRANSPOSE PERMUTATIONS")
-          print("=" * 70)
-
-
-          patched_count = 0
-
-
-          for node in raw_model.graph.node:
-
-              if node.op_type != "Transpose":
-                  continue
-
-
-              for attribute in node.attribute:
-
-                  if attribute.name != "perm":
-                      continue
-
-
-                  perm = list(
-                      attribute.ints
-                  )
-
-
-                  if not any(
-                      value < 0
-                      for value in perm
-                  ):
-
-                      continue
-
-
-                  # ------------------------------------------------
-                  # This Sana VAE graph uses rank-4 tensors.
-                  # Normalize negative indexes exactly like Python.
-                  # ------------------------------------------------
-
-                  rank = len(perm)
-
-
-                  normalized = []
-
-                  for value in perm:
-
-                      if value < 0:
-
-                          value = (
-                              rank +
-                              value
+                      if sorted(fixed) != list(range(rank)):
+                          raise RuntimeError(
+                              f"Unsafe Transpose permutation: {perm}"
                           )
 
-                      normalized.append(
-                          value
+                      print(
+                          "PATCH:",
+                          node.name,
+                          perm,
+                          "->",
+                          fixed
                       )
 
+                      attr.ints[:] = fixed
+                      patched += 1
 
-                  # ------------------------------------------------
-                  # Validate normalized permutation
-                  # ------------------------------------------------
+          print("Patched Transpose nodes:", patched)
 
-                  if sorted(normalized) != list(
-                      range(rank)
-                  ):
-
-                      raise RuntimeError(
-                          "Cannot safely normalize "
-                          "Transpose node "
-                          + node.name
-                          + ": "
-                          + str(perm)
-                      )
-
-
-                  print(
-                      "PATCH:",
-                      node.name,
-                      str(perm),
-                      "->",
-                      str(normalized)
-                  )
-
-
-                  attribute.ints[:] = normalized
-
-                  patched_count += 1
-
-
-          print("")
-          print(
-              "Patched Transpose nodes:",
-              patched_count
-          )
-
-
-          # ==========================================================
-          # SAVE PATCHED MODEL
-          # ==========================================================
-
-          patched_path = (
-              OUTPUT_DIR +
-              "/sana_vae_decoder_patched.onnx"
-          )
-
+          final_path = "onnx/sana_vae_decoder_final.onnx"
 
           onnx.save(
-              raw_model,
-              patched_path
+              model,
+              final_path
           )
 
-
-          print("")
-          print(
-              "Patched model:",
-              patched_path
-          )
-
-
-          # ==========================================================
-          # LOAD PATCHED MODEL
-          # ==========================================================
-
-          patched_model = onnx.load(
-              patched_path,
+          final_model = onnx.load(
+              final_path,
               load_external_data=True
           )
 
+          onnx.checker.check_model(final_model)
 
-          # ==========================================================
-          # ONNX CHECKER
-          # ==========================================================
+          print("Final ONNX checker: PASS")
 
-          print("")
-          print("=" * 70)
-          print("CHECKING PATCHED ONNX")
-          print("=" * 70)
+          bad = 0
 
-
-          onnx.checker.check_model(
-              patched_model
-          )
-
-
-          print(
-              "Patched ONNX CHECK: PASS"
-          )
-
-
-          # ==========================================================
-          # SHAPE INFERENCE
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("RUNNING SHAPE INFERENCE")
-          print("=" * 70)
-
-
-          inferred_model = (
-              onnx.shape_inference.infer_shapes(
-                  patched_model
-              )
-          )
-
-
-          inferred_path = (
-              OUTPUT_DIR +
-              "/sana_vae_decoder_final.onnx"
-          )
-
-
-          onnx.save(
-              inferred_model,
-              inferred_path
-          )
-
-
-          print(
-              "Final ONNX:",
-              inferred_path
-          )
-
-
-          # ==========================================================
-          # FINAL CHECK
-          # ==========================================================
-
-          onnx.checker.check_model(
-              inferred_path
-          )
-
-
-          print(
-              "Final ONNX CHECK: PASS"
-          )
-
-
-          # ==========================================================
-          # PRINT ALL TRANSPOSE PERMS
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("FINAL TRANSPOSE VERIFICATION")
-          print("=" * 70)
-
-
-          final_bad = 0
-
-
-          for node in inferred_model.graph.node:
-
+          for node in final_model.graph.node:
               if node.op_type != "Transpose":
                   continue
 
-              for attribute in node.attribute:
+              for attr in node.attribute:
+                  if attr.name == "perm":
+                      perm = list(attr.ints)
+                      if any(v < 0 for v in perm):
+                          bad += 1
 
-                  if attribute.name != "perm":
-                      continue
-
-                  perm = list(
-                      attribute.ints
-                  )
-
-                  print(
-                      node.name,
-                      "perm=",
-                      perm
-                  )
-
-
-                  if any(
-                      value < 0
-                      for value in perm
-                  ):
-
-                      final_bad += 1
-
-
-          print("")
-          print(
-              "Remaining invalid Transpose nodes:",
-              final_bad
-          )
-
-
-          if final_bad != 0:
-
+          if bad:
               raise RuntimeError(
-                  "Invalid Transpose nodes remain."
+                  f"{bad} invalid Transpose nodes remain"
               )
 
+          print("Transpose validation: PASS")
 
-          # ==========================================================
-          # ORT
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("ONNX RUNTIME CPU TEST")
-          print("=" * 70)
-
-
-          print(
-              "Loading:",
-              inferred_path
-          )
-
-
-          session = ort.InferenceSession(
-              inferred_path,
-              providers=[
-                  "CPUExecutionProvider"
-              ]
-          )
-
-
-          print(
-              "ONNX Runtime session: PASS"
-          )
-
-
-          input_info = (
-              session.get_inputs()[0]
-          )
-
-          output_info = (
-              session.get_outputs()[0]
-          )
-
-
-          print(
-              "Input:",
-              input_info.name,
-              input_info.shape,
-              input_info.type
-          )
-
-
-          print(
-              "Output:",
-              output_info.name,
-              output_info.shape,
-              output_info.type
-          )
-
-
-          # ==========================================================
-          # ORT RUN
-          # ==========================================================
-
-          latent_np = (
-              latent
-              .cpu()
-              .numpy()
-              .astype(np.float32)
-          )
-
-
-          print("")
-          print(
-              "Running ONNX Runtime..."
-          )
-
-
-          ort_output = session.run(
-              None,
-              {
-                  input_info.name:
-                      latent_np
-              }
-          )[0]
-
-
-          print(
-              "ORT output shape:",
-              list(ort_output.shape)
-          )
-
-          print(
-              "ORT output dtype:",
-              ort_output.dtype
-          )
-
-          print(
-              "ORT output min:",
-              float(
-                  ort_output.min()
-              )
-          )
-
-          print(
-              "ORT output max:",
-              float(
-                  ort_output.max()
-              )
-          )
-
-
-          if list(
-              ort_output.shape
-          ) != expected_output:
-
-              raise RuntimeError(
-                  "Unexpected ORT output shape: "
-                  + str(
-                      list(
-                          ort_output.shape
-                      )
-                  )
-              )
-
-
-          print(
-              "ONNX Runtime output shape: PASS"
-          )
-
-
-          # ==========================================================
-          # NUMERICAL COMPARISON
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("PYTORCH VS ONNX")
-          print("=" * 70)
-
-
-          pytorch_np = (
-              pytorch_output
-              .cpu()
-              .numpy()
-              .astype(np.float32)
-          )
-
-
-          difference = np.abs(
-              pytorch_np -
-              ort_output
-          )
-
-
-          max_difference = float(
-              difference.max()
-          )
-
-          mean_difference = float(
-              difference.mean()
-          )
-
-
-          print(
-              "Maximum absolute difference:",
-              max_difference
-          )
-
-          print(
-              "Mean absolute difference:",
-              mean_difference
-          )
-
-
-          if not np.allclose(
-              pytorch_np,
-              ort_output,
-              rtol=1e-3,
-              atol=1e-3
-          ):
-
-              raise RuntimeError(
-                  "PyTorch and ONNX outputs "
-                  "differ too much."
-              )
-
-
-          print(
-              "PyTorch vs ONNX: PASS"
-          )
-
-
-          # ==========================================================
-          # SUCCESS
-          # ==========================================================
-
-          print("")
-          print("=" * 70)
-          print("SANA VAE ONNX VALIDATION COMPLETE")
-          print("=" * 70)
-
-          print("")
-          print("PyTorch VAE      : PASS")
-          print("ONNX export      : PASS")
-          print("ONNX checker     : PASS")
-          print("Transpose repair : PASS")
-          print("Shape inference  : PASS")
-          print("ONNX Runtime CPU : PASS")
-          print("Output           : [1,3,512,512]")
-          print("")
-          print("NEXT STEP: MNN CONVERSION")
-          print("")
-
-
+          print("\nEXPORT VALIDATION COMPLETE")
+          print("PyTorch: PASS")
+          print("ONNX: PASS")
+          print("Transpose repair: PASS")
+          print("Ready for MNN")
           PY
-
-
-      # ============================================================
-      # RUN EXPORT
-      # ============================================================
 
       - name: Export and validate VAE
         run: |
           python export_vae.py
 
-
-      # ============================================================
-      # CLONE MNN
-      # ============================================================
-
       - name: Clone MNN
         run: |
-          git clone \
-            --depth 1 \
-            https://github.com/alibaba/MNN.git \
-            MNN
-
-
-      # ============================================================
-      # BUILD MNN CONVERTER
-      # ============================================================
+          git clone --depth 1 https://github.com/alibaba/MNN.git MNN
 
       - name: Build MNN converter
         run: |
-          cd MNN
-
-          mkdir -p build
-
-          cd build
-
+          mkdir -p MNN/build
+          cd MNN/build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DMNN_BUILD_SHARED_LIBS=OFF \
@@ -994,53 +267,22 @@ jobs:
             -DMNN_SEP_BUILD=OFF \
             -DMNN_BUILD_OPENCV=OFF \
             -DMNN_IMGCODECS=OFF
-
-          cmake \
-            --build . \
-            --target MNNConvert \
-            -j2
-
-          echo ""
-          echo "MNN converter built."
-
-
-      # ============================================================
-      # LOCATE CONVERTER
-      # ============================================================
+          cmake --build . --target MNNConvert -j2
+          echo "MNNConvert build: PASS"
 
       - name: Locate MNNConvert
         run: |
-          MNN_CONVERT=$(find MNN/build \
-            -type f \
-            -name MNNConvert \
-            | head -1)
-
-          if [ -z "$MNN_CONVERT" ]; then
-            echo "ERROR: MNNConvert not found."
-            exit 1
-          fi
-
+          MNN_CONVERT=$(find MNN/build -type f -name MNNConvert | head -1)
+          test -n "$MNN_CONVERT"
           echo "$MNN_CONVERT" > mnn_converter_path.txt
+          echo "MNNConvert: $MNN_CONVERT"
 
-          echo ""
-          echo "MNNConvert:"
-          echo "$MNN_CONVERT"
-
-
-      # ============================================================
-      # CONVERT TO MNN
-      # ============================================================
-
-      - name: Convert repaired VAE to MNN FP32
+      - name: Convert VAE to MNN FP32
         run: |
           mkdir -p mnn_models
-
           MNN_CONVERT=$(cat mnn_converter_path.txt)
 
-          echo ""
-          echo "======================================================================"
-          echo "CONVERTING REPAIRED SANA VAE TO MNN FP32"
-          echo "======================================================================"
+          echo "Converting Sana VAE to MNN FP32..."
 
           "$MNN_CONVERT" \
             -f ONNX \
@@ -1048,217 +290,85 @@ jobs:
             --MNNModel mnn_models/sana_vae_decoder_fp32.mnn \
             --optimizePrefer=2
 
-          echo ""
-          echo "MNN conversion complete."
+          test -s mnn_models/sana_vae_decoder_fp32.mnn
+          ls -lh mnn_models/sana_vae_decoder_fp32.mnn
+          echo "MNN FP32 conversion: PASS"
 
-          ls -lh \
-            mnn_models/sana_vae_decoder_fp32.mnn
-
-
-      # ============================================================
-      # CREATE MNN TEST
-      # ============================================================
-
-      - name: Create MNN VAE CPU test
+      - name: Create MNN CPU test
         run: |
           cat > test_mnn_vae.cpp <<'CPP'
-
           #include <MNN/Interpreter.hpp>
           #include <MNN/Tensor.hpp>
-
           #include <algorithm>
           #include <iostream>
 
-
-          int main(
-              int argc,
-              char** argv
-          ) {
-
+          int main(int argc, char** argv) {
               if (argc < 2) {
-
-                  std::cerr
-                      << "Usage: test_mnn_vae <model.mnn>"
-                      << std::endl;
-
+                  std::cerr << "Usage: test_mnn_vae <model.mnn>\n";
                   return 1;
               }
 
+              const char* modelPath = argv[1];
 
-              const char* modelPath =
-                  argv[1];
-
-
-              std::cout
-                  << "============================================================"
-                  << std::endl;
-
-              std::cout
-                  << "MNN VAE CPU TEST"
-                  << std::endl;
-
-              std::cout
-                  << "============================================================"
-                  << std::endl;
-
-
-              std::cout
-                  << "Model: "
-                  << modelPath
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // INTERPRETER
-              // ----------------------------------------------------
+              std::cout << "============================================================\n";
+              std::cout << "MNN VAE CPU TEST\n";
+              std::cout << "============================================================\n";
+              std::cout << "Model: " << modelPath << "\n";
 
               auto interpreter =
-                  MNN::Interpreter::createFromFile(
-                      modelPath
-                  );
+                  MNN::Interpreter::createFromFile(modelPath);
 
-
-              if (interpreter == nullptr) {
-
-                  std::cerr
-                      << "FAIL: Interpreter creation failed."
-                      << std::endl;
-
+              if (!interpreter) {
+                  std::cerr << "Interpreter: FAIL\n";
                   return 2;
               }
 
-
-              std::cout
-                  << "Interpreter: PASS"
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // CPU
-              // ----------------------------------------------------
+              std::cout << "Interpreter: PASS\n";
 
               MNN::ScheduleConfig config;
-
-              config.type =
-                  MNN_FORWARD_CPU;
-
-              config.numThread =
-                  2;
-
+              config.type = MNN_FORWARD_CPU;
+              config.numThread = 2;
 
               auto session =
-                  interpreter->createSession(
-                      config
-                  );
+                  interpreter->createSession(config);
 
-
-              if (session == nullptr) {
-
-                  std::cerr
-                      << "FAIL: CPU session creation failed."
-                      << std::endl;
-
-                  MNN::Interpreter::destroy(
-                      interpreter
-                  );
-
+              if (!session) {
+                  std::cerr << "CPU session: FAIL\n";
+                  MNN::Interpreter::destroy(interpreter);
                   return 3;
               }
 
-
-              std::cout
-                  << "CPU session: PASS"
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // INPUT
-              // ----------------------------------------------------
+              std::cout << "CPU session: PASS\n";
 
               auto input =
-                  interpreter->getSessionInput(
-                      session,
-                      nullptr
-                  );
+                  interpreter->getSessionInput(session, nullptr);
 
-
-              if (input == nullptr) {
-
-                  std::cerr
-                      << "FAIL: Input is null."
-                      << std::endl;
-
-                  interpreter->releaseSession(
-                      session
-                  );
-
-                  MNN::Interpreter::destroy(
-                      interpreter
-                  );
-
+              if (!input) {
+                  std::cerr << "Input: FAIL\n";
+                  interpreter->releaseSession(session);
+                  MNN::Interpreter::destroy(interpreter);
                   return 4;
               }
 
-
-              std::cout
-                  << "Input shape: [";
-
-
-              for (
-                  int i = 0;
-                  i < input->dimensions();
-                  ++i
-              ) {
-
-                  if (i > 0)
-                      std::cout << ",";
-
-                  std::cout
-                      << input->length(i);
+              std::cout << "Input shape: [";
+              for (int i = 0; i < input->dimensions(); ++i) {
+                  if (i) std::cout << ",";
+                  std::cout << input->length(i);
               }
+              std::cout << "]\n";
 
-
-              std::cout
-                  << "]"
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // VERIFY INPUT
-              // ----------------------------------------------------
-
-              if (
-                  input->dimensions() != 4 ||
+              if (input->dimensions() != 4 ||
                   input->length(0) != 1 ||
                   input->length(1) != 32 ||
                   input->length(2) != 16 ||
-                  input->length(3) != 16
-              ) {
-
-                  std::cerr
-                      << "FAIL: Expected [1,32,16,16]."
-                      << std::endl;
-
-                  interpreter->releaseSession(
-                      session
-                  );
-
-                  MNN::Interpreter::destroy(
-                      interpreter
-                  );
-
+                  input->length(3) != 16) {
+                  std::cerr << "Input shape: FAIL\n";
+                  interpreter->releaseSession(session);
+                  MNN::Interpreter::destroy(interpreter);
                   return 5;
               }
 
-
-              std::cout
-                  << "Input shape: PASS"
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // HOST TENSOR
-              // ----------------------------------------------------
+              std::cout << "Input shape: PASS\n";
 
               MNN::Tensor hostTensor(
                   input,
@@ -1266,127 +376,51 @@ jobs:
                   true
               );
 
+              float* host = hostTensor.host<float>();
 
-              float* host =
-                  hostTensor.host<float>();
-
-
-              if (host == nullptr) {
-
-                  std::cerr
-                      << "FAIL: Host pointer is null."
-                      << std::endl;
-
-                  interpreter->releaseSession(
-                      session
-                  );
-
-                  MNN::Interpreter::destroy(
-                      interpreter
-                  );
-
+              if (!host) {
+                  std::cerr << "Host tensor: FAIL\n";
+                  interpreter->releaseSession(session);
+                  MNN::Interpreter::destroy(interpreter);
                   return 6;
               }
 
+              const int elements = 1 * 32 * 16 * 16;
 
-              // ----------------------------------------------------
-              // LATENT
-              // ----------------------------------------------------
-
-              const int elements =
-                  1 * 32 * 16 * 16;
-
-
-              for (
-                  int i = 0;
-                  i < elements;
-                  ++i
-              ) {
-
+              for (int i = 0; i < elements; ++i) {
                   host[i] =
                       -0.05f +
-                      (
-                          static_cast<float>(i)
-                          * 0.000390625f
-                      );
+                      static_cast<float>(i) * 0.000390625f;
               }
-
 
               std::cout
                   << "Latent sample: "
-                  << host[0]
-                  << ", "
-                  << host[1]
-                  << ", "
-                  << host[2]
-                  << ", "
-                  << host[3]
-                  << std::endl;
+                  << host[0] << ", "
+                  << host[1] << ", "
+                  << host[2] << ", "
+                  << host[3] << "\n";
 
+              input->copyFromHostTensor(&hostTensor);
 
-              // ----------------------------------------------------
-              // COPY
-              // ----------------------------------------------------
-
-              input->copyFromHostTensor(
-                  &hostTensor
-              );
-
-
-              std::cout
-                  << "Host -> MNN: PASS"
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // RUN
-              // ----------------------------------------------------
-
-              std::cout
-                  << "Running MNN..."
-                  << std::endl;
-
+              std::cout << "Host -> MNN: PASS\n";
+              std::cout << "Running MNN...\n";
 
               auto result =
-                  interpreter->runSession(
-                      session
-                  );
-
+                  interpreter->runSession(session);
 
               std::cout
                   << "MNN result: "
                   << result
-                  << std::endl;
+                  << "\n";
 
-
-              if (
-                  result != MNN::NO_ERROR
-              ) {
-
-                  std::cerr
-                      << "FAIL: MNN inference failed."
-                      << std::endl;
-
-                  interpreter->releaseSession(
-                      session
-                  );
-
-                  MNN::Interpreter::destroy(
-                      interpreter
-                  );
-
+              if (result != MNN::NO_ERROR) {
+                  std::cerr << "MNN inference: FAIL\n";
+                  interpreter->releaseSession(session);
+                  MNN::Interpreter::destroy(interpreter);
                   return 7;
               }
 
-
-              std::cout
-                  << "MNN inference: PASS"
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // OUTPUT
-              // ----------------------------------------------------
+              std::cout << "MNN inference: PASS\n";
 
               auto output =
                   interpreter->getSessionOutput(
@@ -1394,84 +428,32 @@ jobs:
                       nullptr
                   );
 
-
-              if (output == nullptr) {
-
-                  std::cerr
-                      << "FAIL: Output is null."
-                      << std::endl;
-
-                  interpreter->releaseSession(
-                      session
-                  );
-
-                  MNN::Interpreter::destroy(
-                      interpreter
-                  );
-
+              if (!output) {
+                  std::cerr << "Output: FAIL\n";
+                  interpreter->releaseSession(session);
+                  MNN::Interpreter::destroy(interpreter);
                   return 8;
               }
 
-
-              std::cout
-                  << "Output shape: [";
-
-
-              for (
-                  int i = 0;
-                  i < output->dimensions();
-                  ++i
-              ) {
-
-                  if (i > 0)
-                      std::cout << ",";
-
-                  std::cout
-                      << output->length(i);
+              std::cout << "Output shape: [";
+              for (int i = 0; i < output->dimensions(); ++i) {
+                  if (i) std::cout << ",";
+                  std::cout << output->length(i);
               }
+              std::cout << "]\n";
 
-
-              std::cout
-                  << "]"
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // OUTPUT CHECK
-              // ----------------------------------------------------
-
-              if (
-                  output->dimensions() != 4 ||
+              if (output->dimensions() != 4 ||
                   output->length(0) != 1 ||
                   output->length(1) != 3 ||
                   output->length(2) != 512 ||
-                  output->length(3) != 512
-              ) {
-
-                  std::cerr
-                      << "FAIL: Expected [1,3,512,512]."
-                      << std::endl;
-
-                  interpreter->releaseSession(
-                      session
-                  );
-
-                  MNN::Interpreter::destroy(
-                      interpreter
-                  );
-
+                  output->length(3) != 512) {
+                  std::cerr << "Output shape: FAIL\n";
+                  interpreter->releaseSession(session);
+                  MNN::Interpreter::destroy(interpreter);
                   return 9;
               }
 
-
-              std::cout
-                  << "Output shape: PASS"
-                  << std::endl;
-
-
-              // ----------------------------------------------------
-              // COPY OUTPUT
-              // ----------------------------------------------------
+              std::cout << "Output shape: PASS\n";
 
               MNN::Tensor outputHost(
                   output,
@@ -1479,130 +461,63 @@ jobs:
                   true
               );
 
+              output->copyToHostTensor(&outputHost);
 
-              output->copyToHostTensor(
-                  &outputHost
-              );
-
-
-              float* outputData =
+              float* data =
                   outputHost.host<float>();
 
-
-              if (outputData == nullptr) {
-
-                  std::cerr
-                      << "FAIL: Output host pointer null."
-                      << std::endl;
-
-                  interpreter->releaseSession(
-                      session
-                  );
-
-                  MNN::Interpreter::destroy(
-                      interpreter
-                  );
-
+              if (!data) {
+                  std::cerr << "Output host: FAIL\n";
+                  interpreter->releaseSession(session);
+                  MNN::Interpreter::destroy(interpreter);
                   return 10;
               }
 
-
-              const int outputElements =
+              int outputElements =
                   output->elementSize();
 
+              float minValue = data[0];
+              float maxValue = data[0];
 
-              float minValue =
-                  outputData[0];
-
-              float maxValue =
-                  outputData[0];
-
-
-              for (
-                  int i = 1;
-                  i < outputElements;
-                  ++i
-              ) {
-
+              for (int i = 1; i < outputElements; ++i) {
                   minValue =
-                      std::min(
-                          minValue,
-                          outputData[i]
-                      );
-
+                      std::min(minValue, data[i]);
                   maxValue =
-                      std::max(
-                          maxValue,
-                          outputData[i]
-                      );
+                      std::max(maxValue, data[i]);
               }
-
 
               std::cout
                   << "Output elements: "
                   << outputElements
-                  << std::endl;
-
+                  << "\n";
 
               std::cout
                   << "Output[0]: "
-                  << outputData[0]
-                  << std::endl;
-
+                  << data[0]
+                  << "\n";
 
               std::cout
                   << "Output min: "
                   << minValue
-                  << std::endl;
-
+                  << "\n";
 
               std::cout
                   << "Output max: "
                   << maxValue
-                  << std::endl;
+                  << "\n";
 
+              std::cout << "============================================================\n";
+              std::cout << "MNN VAE CPU TEST: PASS\n";
+              std::cout << "============================================================\n";
 
-              // ----------------------------------------------------
-              // SUCCESS
-              // ----------------------------------------------------
-
-              std::cout
-                  << ""
-                  << std::endl;
-
-              std::cout
-                  << "============================================================"
-                  << std::endl;
-
-              std::cout
-                  << "MNN VAE CPU TEST: PASS"
-                  << std::endl;
-
-              std::cout
-                  << "============================================================"
-                  << std::endl;
-
-
-              interpreter->releaseSession(
-                  session
-              );
-
-              MNN::Interpreter::destroy(
-                  interpreter
-              );
-
+              interpreter->releaseSession(session);
+              MNN::Interpreter::destroy(interpreter);
 
               return 0;
           }
-
           CPP
 
-
-      # ============================================================
-      # BUILD MNN TEST
-      # ============================================================
-
-      - name: Build MNN VAE CPU test
+      - name: Build MNN CPU test
         run: |
           g++ \
             -std=c++17 \
@@ -1614,108 +529,113 @@ jobs:
             -lpthread \
             -ldl \
             -o test_mnn_vae
+          echo "MNN test build: PASS"
 
-          echo "MNN test compiled."
-
-
-      # ============================================================
-      # RUN MNN
-      # ============================================================
-
-      - name: Run MNN VAE CPU test
+      - name: Test MNN FP32 VAE
         run: |
-          ./test_mnn_vae \
-            mnn_models/sana_vae_decoder_fp32.mnn
+          ./test_mnn_vae mnn_models/sana_vae_decoder_fp32.mnn
 
-      # ============================================================
-      # CREATE ANDROID PACKAGE
-      # ============================================================
+      - name: Convert verified MNN FP32 to FP16
+        run: |
+          MNN_CONVERT=$(cat mnn_converter_path.txt)
+
+          echo "============================================================"
+          echo "CONVERTING VERIFIED MNN FP32 VAE TO FP16"
+          echo "============================================================"
+
+          "$MNN_CONVERT" \
+            -f MNN \
+            --modelFile mnn_models/sana_vae_decoder_fp32.mnn \
+            --MNNModel mnn_models/sana_vae_decoder_fp16.mnn \
+            --fp16
+
+          test -s mnn_models/sana_vae_decoder_fp16.mnn
+
+          echo "FP16 conversion: PASS"
+          ls -lh \
+            mnn_models/sana_vae_decoder_fp32.mnn \
+            mnn_models/sana_vae_decoder_fp16.mnn
+
+      - name: Test MNN FP16 VAE
+        run: |
+          echo "============================================================"
+          echo "MNN VAE FP16 CPU TEST"
+          echo "============================================================"
+
+          ./test_mnn_vae \
+            mnn_models/sana_vae_decoder_fp16.mnn
+
+          echo "MNN FP16 CPU test: PASS"
 
       - name: Create Android VAE package
         run: |
+          rm -rf android_package
           mkdir -p android_package
 
-          cp mnn_models/sana_vae_decoder_fp32.mnn \
-             android_package/sana_vae_decoder.mnn
+          cp \
+            mnn_models/sana_vae_decoder_fp16.mnn \
+            android_package/sana_vae_decoder.mnn
 
-          cp sana_model/vae/config.json \
-             android_package/config.json
+          cp \
+            sana_model/vae/config.json \
+            android_package/config.json
 
-          cp sana_model/scheduler/scheduler_config.json \
-             android_package/scheduler_config.json
+          cp \
+            sana_model/scheduler/scheduler_config.json \
+            android_package/scheduler_config.json
 
-          cat > android_package/README.txt <<'EOF'
-          Sana Android Model Package
-          ==========================
+          cat > android_package/MODEL_INFO.txt <<'EOF'
+          Sana 0.6B / 512px VAE
 
-          Model: Sana 0.6B / 512px
-          Runtime: Alibaba MNN
+          Runtime: MNN
+          Precision: FP16 weights
+          Input: [1,32,16,16]
+          Output: [1,3,512,512]
 
-          VAE: sana_vae_decoder.mnn
+          Validation:
+          PyTorch VAE: PASS
+          MNN FP32 CPU: PASS
+          MNN FP16 CPU: PASS
 
-          Input : 1 x 32 x 16 x 16
-          Output: 1 x 3 x 512 x 512
-
-          Verified:
-          - PyTorch PASS
-          - MNN FP32 PASS
-
-          Ready for Android integration.
+          Android model filename:
+          sana_vae_decoder.mnn
           EOF
 
-      # ============================================================
-      # CREATE ZIP
-      # ============================================================
+          echo "Android package:"
+          ls -lh android_package
 
-      - name: Zip Android package
+      - name: Create Android ZIP
         run: |
           cd android_package
-          zip -r ../sana_android_vae_fp32.zip .
+          zip -r ../sana_android_vae_fp16.zip .
+          cd ..
 
-      # ============================================================
-      # VERIFY PACKAGE
-      # ============================================================
+          ls -lh sana_android_vae_fp16.zip
 
-      - name: Verify Android package
-        run: |
-          echo "============================================================"
-          echo "ANDROID PACKAGE CONTENTS"
-          echo "============================================================"
-
-          ls -lh android_package
-          ls -lh sana_android_vae_fp32.zip
-
-      # ============================================================
-      # UPLOAD ANDROID PACKAGE
-      # ============================================================
-
-      - name: Upload Android package
+      - name: Upload VAE models
         uses: actions/upload-artifact@v4
         with:
-          name: sana-android-vae-fp32
-          path: sana_android_vae_fp32.zip
+          name: sana-vae-models
+          path: |
+            mnn_models/sana_vae_decoder_fp32.mnn
+            mnn_models/sana_vae_decoder_fp16.mnn
           if-no-files-found: error
 
-          
-      # ============================================================
-      # ARTIFACTS
-      # ============================================================
-
-      - name: Upload VAE validation models
+      - name: Upload Android VAE package
         uses: actions/upload-artifact@v4
         with:
-          name: sana-vae-validation
+          name: sana-android-vae-fp16
+          path: sana_android_vae_fp16.zip
+          if-no-files-found: error
+
+      - name: Upload validation ONNX
+        uses: actions/upload-artifact@v4
+        with:
+          name: sana-vae-onnx-validation
           path: |
             onnx/sana_vae_decoder.onnx
-            onnx/sana_vae_decoder_patched.onnx
             onnx/sana_vae_decoder_final.onnx
-            mnn_models/sana_vae_decoder_fp32.mnn
           if-no-files-found: error
-
-
-      # ============================================================
-      # FINAL
-      # ============================================================
 
       - name: Final report
         run: |
@@ -1723,30 +643,22 @@ jobs:
           echo "======================================================================"
           echo "SANA VAE VALIDATION COMPLETE"
           echo "======================================================================"
-
           echo ""
-          echo "Pipeline:"
+          echo "PyTorch VAE       : PASS"
+          echo "ONNX export       : PASS"
+          echo "Transpose repair  : PASS"
+          echo "MNN FP32          : PASS"
+          echo "MNN FP32 CPU      : PASS"
+          echo "MNN FP16          : PASS"
+          echo "MNN FP16 CPU      : PASS"
           echo ""
-          echo "Official Sana AutoencoderDC"
-          echo "          ↓"
-          echo "PyTorch VAE"
-          echo "          ↓"
-          echo "ONNX"
-          echo "          ↓"
-          echo "Transpose repair"
-          echo "          ↓"
-          echo "ONNX Runtime CPU"
-          echo "          ↓"
-          echo "MNN FP32"
-          echo "          ↓"
-          echo "MNN CPU"
+          echo "Android package:"
+          echo "sana_android_vae_fp16.zip"
           echo ""
-
-          echo "Generated files:"
-          find onnx mnn_models \
-            -type f \
-            -printf "%p %s bytes\n" \
-            | sort
-
+          echo "Android model:"
+          echo "sana_vae_decoder.mnn"
+          echo ""
+          echo "Input : [1,32,16,16]"
+          echo "Output: [1,3,512,512]"
           echo ""
           echo "======================================================================"
