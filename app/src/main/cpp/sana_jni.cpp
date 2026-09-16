@@ -11,7 +11,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -35,17 +37,21 @@ MNN::Session* gSession = nullptr;
 
 
 // ============================================================
-// Helpers
+// Basic helpers
 // ============================================================
 
-std::string jstringToString(JNIEnv* env, jstring value) {
+std::string jstringToString(
+        JNIEnv* env,
+        jstring value) {
 
     if (value == nullptr) {
         return "";
     }
 
     const char* chars =
-            env->GetStringUTFChars(value, nullptr);
+            env->GetStringUTFChars(
+                    value,
+                    nullptr);
 
     if (chars == nullptr) {
         return "";
@@ -105,6 +111,470 @@ bool isFiniteFloat(float value) {
 
 
 // ============================================================
+// Dependency-free SHA-256
+//
+// This is intentionally implemented here so that we do NOT
+// need OpenSSL or any additional Android library.
+// ============================================================
+
+class Sha256 {
+
+private:
+
+    uint32_t state[8];
+
+    uint64_t bitLength;
+
+    unsigned char buffer[64];
+
+    size_t bufferLength;
+
+
+    static uint32_t rotr(
+            uint32_t x,
+            uint32_t n) {
+
+        return (x >> n) |
+               (x << (32 - n));
+    }
+
+
+    static uint32_t choose(
+            uint32_t e,
+            uint32_t f,
+            uint32_t g) {
+
+        return (e & f) ^
+               (~e & g);
+    }
+
+
+    static uint32_t majority(
+            uint32_t a,
+            uint32_t b,
+            uint32_t c) {
+
+        return (a & b) ^
+               (a & c) ^
+               (b & c);
+    }
+
+
+    static uint32_t bigSigma0(
+            uint32_t x) {
+
+        return rotr(x, 2) ^
+               rotr(x, 13) ^
+               rotr(x, 22);
+    }
+
+
+    static uint32_t bigSigma1(
+            uint32_t x) {
+
+        return rotr(x, 6) ^
+               rotr(x, 11) ^
+               rotr(x, 25);
+    }
+
+
+    static uint32_t smallSigma0(
+            uint32_t x) {
+
+        return rotr(x, 7) ^
+               rotr(x, 18) ^
+               (x >> 3);
+    }
+
+
+    static uint32_t smallSigma1(
+            uint32_t x) {
+
+        return rotr(x, 17) ^
+               rotr(x, 19) ^
+               (x >> 10);
+    }
+
+
+    static uint32_t loadBigEndian(
+            const unsigned char* p) {
+
+        return
+                (static_cast<uint32_t>(p[0]) << 24) |
+                (static_cast<uint32_t>(p[1]) << 16) |
+                (static_cast<uint32_t>(p[2]) << 8) |
+                (static_cast<uint32_t>(p[3]));
+    }
+
+
+    static void storeBigEndian(
+            uint32_t value,
+            unsigned char* p) {
+
+        p[0] =
+                static_cast<unsigned char>(
+                        value >> 24);
+
+        p[1] =
+                static_cast<unsigned char>(
+                        value >> 16);
+
+        p[2] =
+                static_cast<unsigned char>(
+                        value >> 8);
+
+        p[3] =
+                static_cast<unsigned char>(
+                        value);
+    }
+
+
+    void transform(
+            const unsigned char block[64]) {
+
+        static const uint32_t K[64] = {
+
+            0x428a2f98,
+            0x71374491,
+            0xb5c0fbcf,
+            0xe9b5dba5,
+
+            0x3956c25b,
+            0x59f111f1,
+            0x923f82a4,
+            0xab1c5ed5,
+
+            0xd807aa98,
+            0x12835b01,
+            0x243185be,
+            0x550c7dc3,
+
+            0x72be5d74,
+            0x80deb1fe,
+            0x9bdc06a7,
+            0xc19bf174,
+
+            0xe49b69c1,
+            0xefbe4786,
+            0x0fc19dc6,
+            0x240ca1cc,
+
+            0x2de92c6f,
+            0x4a7484aa,
+            0x5cb0a9dc,
+            0x76f988da,
+
+            0x983e5152,
+            0xa831c66d,
+            0xb00327c8,
+            0xbf597fc7,
+
+            0xc6e00bf3,
+            0xd5a79147,
+            0x06ca6351,
+            0x14292967,
+
+            0x27b70a85,
+            0x2e1b2138,
+            0x4d2c6dfc,
+            0x53380d13,
+
+            0x650a7354,
+            0x766a0abb,
+            0x81c2c92e,
+            0x92722c85,
+
+            0xa2bfe8a1,
+            0xa81a664b,
+            0xc24b8b70,
+            0xc76c51a3,
+
+            0xd192e819,
+            0xd6990624,
+            0xf40e3585,
+            0x106aa070,
+
+            0x19a4c116,
+            0x1e376c08,
+            0x2748774c,
+            0x34b0bcb5,
+
+            0x391c0cb3,
+            0x4ed8aa4a,
+            0x5b9cca4f,
+            0x682e6ff3,
+
+            0x748f82ee,
+            0x78a5636f,
+            0x84c87814,
+            0x8cc70208,
+
+            0x90befffa,
+            0xa4506ceb,
+            0xbef9a3f7,
+            0xc67178f2
+        };
+
+
+        uint32_t W[64];
+
+
+        for (int i = 0; i < 16; ++i) {
+
+            W[i] =
+                    loadBigEndian(
+                            block + (i * 4));
+        }
+
+
+        for (int i = 16; i < 64; ++i) {
+
+            W[i] =
+                    smallSigma1(W[i - 2]) +
+                    W[i - 7] +
+                    smallSigma0(W[i - 15]) +
+                    W[i - 16];
+        }
+
+
+        uint32_t a = state[0];
+        uint32_t b = state[1];
+        uint32_t c = state[2];
+        uint32_t d = state[3];
+        uint32_t e = state[4];
+        uint32_t f = state[5];
+        uint32_t g = state[6];
+        uint32_t h = state[7];
+
+
+        for (int i = 0; i < 64; ++i) {
+
+            uint32_t T1 =
+                    h +
+                    bigSigma1(e) +
+                    choose(e, f, g) +
+                    K[i] +
+                    W[i];
+
+            uint32_t T2 =
+                    bigSigma0(a) +
+                    majority(a, b, c);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d + T1;
+            d = c;
+            c = b;
+            b = a;
+            a = T1 + T2;
+        }
+
+
+        state[0] += a;
+        state[1] += b;
+        state[2] += c;
+        state[3] += d;
+        state[4] += e;
+        state[5] += f;
+        state[6] += g;
+        state[7] += h;
+    }
+
+
+public:
+
+    Sha256()
+            : bitLength(0),
+              bufferLength(0) {
+
+        state[0] = 0x6a09e667;
+        state[1] = 0xbb67ae85;
+        state[2] = 0x3c6ef372;
+        state[3] = 0xa54ff53a;
+        state[4] = 0x510e527f;
+        state[5] = 0x9b05688c;
+        state[6] = 0x1f83d9ab;
+        state[7] = 0x5be0cd19;
+
+        std::memset(
+                buffer,
+                0,
+                sizeof(buffer));
+    }
+
+
+    void update(
+            const unsigned char* data,
+            size_t length) {
+
+        if (data == nullptr ||
+            length == 0) {
+
+            return;
+        }
+
+
+        bitLength +=
+                static_cast<uint64_t>(length) *
+                8ULL;
+
+
+        size_t offset = 0;
+
+
+        while (offset < length) {
+
+            size_t available =
+                    64 - bufferLength;
+
+            size_t copySize =
+                    std::min(
+                            available,
+                            length - offset);
+
+
+            std::memcpy(
+                    buffer + bufferLength,
+                    data + offset,
+                    copySize);
+
+
+            bufferLength += copySize;
+            offset += copySize;
+
+
+            if (bufferLength == 64) {
+
+                transform(buffer);
+
+                bufferLength = 0;
+            }
+        }
+    }
+
+
+    std::string final() {
+
+        uint64_t originalBitLength =
+                bitLength;
+
+
+        buffer[bufferLength++] = 0x80;
+
+
+        if (bufferLength > 56) {
+
+            while (bufferLength < 64) {
+
+                buffer[bufferLength++] = 0;
+            }
+
+            transform(buffer);
+
+            bufferLength = 0;
+        }
+
+
+        while (bufferLength < 56) {
+
+            buffer[bufferLength++] = 0;
+        }
+
+
+        for (int i = 7; i >= 0; --i) {
+
+            buffer[bufferLength++] =
+                    static_cast<unsigned char>(
+                            originalBitLength >>
+                            (i * 8));
+        }
+
+
+        transform(buffer);
+
+
+        unsigned char digest[32];
+
+
+        for (int i = 0; i < 8; ++i) {
+
+            storeBigEndian(
+                    state[i],
+                    digest + (i * 4));
+        }
+
+
+        std::ostringstream output;
+
+
+        for (int i = 0; i < 32; ++i) {
+
+            output
+                    << std::hex
+                    << std::setw(2)
+                    << std::setfill('0')
+                    << static_cast<int>(
+                            digest[i]);
+        }
+
+
+        return output.str();
+    }
+};
+
+
+std::string calculateSha256(
+        const std::string& filePath) {
+
+    std::ifstream file(
+            filePath,
+            std::ios::binary);
+
+    if (!file.is_open()) {
+
+        return "ERROR: unable to open file";
+    }
+
+
+    Sha256 sha;
+
+
+    unsigned char buffer[1024 * 1024];
+
+
+    while (file.good()) {
+
+        file.read(
+                reinterpret_cast<char*>(buffer),
+                sizeof(buffer));
+
+
+        std::streamsize bytes =
+                file.gcount();
+
+
+        if (bytes > 0) {
+
+            sha.update(
+                    buffer,
+                    static_cast<size_t>(
+                            bytes));
+        }
+    }
+
+
+    if (file.bad()) {
+
+        return "ERROR: file read failed";
+    }
+
+
+    return sha.final();
+}
+
+
+// ============================================================
 // CPU schedule
 // ============================================================
 
@@ -113,8 +583,11 @@ MNN::ScheduleConfig makeCpuScheduleConfig(
 
     MNN::ScheduleConfig config;
 
-    config.type = MNN_FORWARD_CPU;
-    config.numThread = cpuThreads;
+    config.type =
+            MNN_FORWARD_CPU;
+
+    config.numThread =
+            cpuThreads;
 
     return config;
 }
@@ -128,12 +601,17 @@ MNN::ScheduleConfig makeOpenClScheduleConfig() {
 
     MNN::ScheduleConfig config;
 
-    config.type = MNN_FORWARD_OPENCL;
-    config.numThread = 4;
+    config.type =
+            MNN_FORWARD_OPENCL;
 
-    config.mode = MNN_GPU_TUNING_HEAVY;
+    config.numThread =
+            4;
 
-    config.backupType = MNN_FORWARD_CPU;
+    config.mode =
+            MNN_GPU_TUNING_HEAVY;
+
+    config.backupType =
+            MNN_FORWARD_CPU;
 
     return config;
 }
@@ -154,6 +632,7 @@ void releaseGlobalSession() {
         gSession = nullptr;
     }
 
+
     if (gInterpreter != nullptr) {
 
         delete gInterpreter;
@@ -161,13 +640,15 @@ void releaseGlobalSession() {
         gInterpreter = nullptr;
     }
 
+
     gInitialized = false;
+
     gBackend = "NONE";
 }
 
 
 // ============================================================
-// Create CPU session
+// CPU session
 // ============================================================
 
 MNN::Session* createCpuSession(
@@ -178,9 +659,11 @@ MNN::Session* createCpuSession(
         return nullptr;
     }
 
+
     MNN::ScheduleConfig config =
             makeCpuScheduleConfig(
                     cpuThreads);
+
 
     return interpreter->createSession(
             config);
@@ -188,7 +671,7 @@ MNN::Session* createCpuSession(
 
 
 // ============================================================
-// Create OpenCL session
+// OpenCL session
 // ============================================================
 
 MNN::Session* createOpenClSession(
@@ -198,8 +681,10 @@ MNN::Session* createOpenClSession(
         return nullptr;
     }
 
+
     MNN::ScheduleConfig config =
             makeOpenClScheduleConfig();
+
 
     return interpreter->createSession(
             config);
@@ -207,7 +692,7 @@ MNN::Session* createOpenClSession(
 
 
 // ============================================================
-// Transformer CPU test
+// Transformer CPU TEST
 // ============================================================
 
 std::string runTransformerCpuTest(
@@ -215,10 +700,12 @@ std::string runTransformerCpuTest(
 
     std::ostringstream report;
 
+
     report
             << "============================================\n"
             << "SANA TRANSFORMER CPU TEST\n"
             << "============================================\n";
+
 
     report
             << "Model:\n"
@@ -268,7 +755,8 @@ std::string runTransformerCpuTest(
             std::chrono::duration<
                     double,
                     std::milli>(
-                    createEnd - createStart)
+                    createEnd -
+                    createStart)
                     .count();
 
 
@@ -309,7 +797,8 @@ std::string runTransformerCpuTest(
             std::chrono::duration<
                     double,
                     std::milli>(
-                    sessionEnd - sessionStart)
+                    sessionEnd -
+                    sessionStart)
                     .count();
 
 
@@ -502,6 +991,10 @@ std::string runTransformerCpuTest(
     // Run transformer
     // --------------------------------------------------------
 
+    report
+            << "Running transformer inference...\n";
+
+
     auto inferenceStart =
             std::chrono::steady_clock::now();
 
@@ -525,7 +1018,6 @@ std::string runTransformerCpuTest(
 
 
     report
-            << "Running transformer inference...\n"
             << "Inference time: "
             << inferenceMs
             << " ms\n"
@@ -647,14 +1139,9 @@ std::string runTransformerCpuTest(
 // ============================================================
 // VAE CPU TEST
 //
-// IMPORTANT:
-// This test uses ONLY ZERO LATENT.
+// ZERO LATENT ONLY.
 //
-// Shape:
-// [1, 32, 16, 16]
-//
-// Every value:
-// 0.0f
+// Transformer is NOT used.
 // ============================================================
 
 std::string runVaeCpuTest(
@@ -693,7 +1180,49 @@ std::string runVaeCpuTest(
     report
             << "File size: "
             << fileSize
-            << " bytes\n\n";
+            << " bytes\n";
+
+
+    // ========================================================
+    // SHA-256
+    // ========================================================
+
+    report
+            << "Calculating VAE SHA-256...\n";
+
+
+    auto shaStart =
+            std::chrono::steady_clock::now();
+
+
+    std::string sha256 =
+            calculateSha256(
+                    vaePath);
+
+
+    auto shaEnd =
+            std::chrono::steady_clock::now();
+
+
+    double shaMs =
+            std::chrono::duration<
+                    double,
+                    std::milli>(
+                    shaEnd -
+                    shaStart)
+                    .count();
+
+
+    report
+            << "SHA-256 calculation time: "
+            << shaMs
+            << " ms\n";
+
+
+    report
+            << "VAE SHA256: "
+            << sha256
+            << "\n";
 
 
     // --------------------------------------------------------
@@ -798,7 +1327,7 @@ std::string runVaeCpuTest(
 
 
     // --------------------------------------------------------
-    // Get latent input
+    // Get latent
     // --------------------------------------------------------
 
     MNN::Tensor* input =
@@ -853,7 +1382,7 @@ std::string runVaeCpuTest(
 
 
     // --------------------------------------------------------
-    // Validate Sana latent shape
+    // Validate latent shape
     // --------------------------------------------------------
 
     bool correctShape =
@@ -945,7 +1474,7 @@ std::string runVaeCpuTest(
 
 
     // --------------------------------------------------------
-    // Verify all zeros
+    // Verify all zero
     // --------------------------------------------------------
 
     bool allZero = true;
@@ -1185,6 +1714,10 @@ std::string runVaeCpuTest(
     bool finite = true;
 
 
+    size_t nanCount = 0;
+    size_t infCount = 0;
+
+
     for (size_t i = 0;
          i < outputHost.elementSize();
          ++i) {
@@ -1193,11 +1726,23 @@ std::string runVaeCpuTest(
                 outputPtr[i];
 
 
-        if (!std::isfinite(value)) {
+        if (std::isnan(value)) {
+
+            ++nanCount;
 
             finite = false;
 
-            break;
+            continue;
+        }
+
+
+        if (std::isinf(value)) {
+
+            ++infCount;
+
+            finite = false;
+
+            continue;
         }
 
 
@@ -1217,6 +1762,18 @@ std::string runVaeCpuTest(
     report
             << "Output[0]: "
             << outputPtr[0]
+            << "\n";
+
+
+    report
+            << "NaN count: "
+            << nanCount
+            << "\n";
+
+
+    report
+            << "Inf count: "
+            << infCount
             << "\n";
 
 
@@ -1281,11 +1838,10 @@ std::string runVaeCpuTest(
 
 
 // ============================================================
-// VAE OpenCL test
+// VAE OpenCL TEST
 //
-// Also uses zero latent.
-// Currently not called by nativeTestVae.
-// Kept available for later testing.
+// Kept for later testing.
+// nativeTestVae currently uses CPU only.
 // ============================================================
 
 std::string runVaeOpenClTest(
@@ -1430,7 +1986,7 @@ std::string runVaeOpenClTest(
 
 
     // --------------------------------------------------------
-    // ZERO LATENT
+    // Zero latent
     // --------------------------------------------------------
 
     MNN::Tensor hostTensor(
@@ -1487,7 +2043,7 @@ std::string runVaeOpenClTest(
 
 
     // --------------------------------------------------------
-    // Run OpenCL VAE
+    // Run OpenCL
     // --------------------------------------------------------
 
     report
@@ -1615,6 +2171,9 @@ std::string runVaeOpenClTest(
 
     bool finite = true;
 
+    size_t nanCount = 0;
+    size_t infCount = 0;
+
 
     for (size_t i = 0;
          i < outputHost.elementSize();
@@ -1624,11 +2183,23 @@ std::string runVaeOpenClTest(
                 outputPtr[i];
 
 
-        if (!std::isfinite(value)) {
+        if (std::isnan(value)) {
+
+            ++nanCount;
 
             finite = false;
 
-            break;
+            continue;
+        }
+
+
+        if (std::isinf(value)) {
+
+            ++infCount;
+
+            finite = false;
+
+            continue;
         }
 
 
@@ -1651,21 +2222,27 @@ std::string runVaeOpenClTest(
             << "\n";
 
 
+    report
+            << "NaN count: "
+            << nanCount
+            << "\n";
+
+
+    report
+            << "Inf count: "
+            << infCount
+            << "\n";
+
+
     if (finite) {
 
         report
                 << "Output min: "
                 << minimum
-                << "\n";
-
-
-        report
+                << "\n"
                 << "Output max: "
                 << maximum
-                << "\n";
-
-
-        report
+                << "\n"
                 << "Output finite: YES\n";
 
     } else {
@@ -1711,6 +2288,10 @@ std::string runVaeOpenClTest(
 
 // ============================================================
 // nativeInitialize
+//
+// Current behavior:
+// CPU initialization.
+// OpenCL preference is intentionally ignored for startup.
 // ============================================================
 
 extern "C"
@@ -2023,9 +2604,9 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
 // ============================================================
 // nativeTestVae
 //
-// IMPORTANT:
 // CPU ONLY
 // ZERO LATENT
+// SHA-256 INCLUDED
 // ============================================================
 
 extern "C"
