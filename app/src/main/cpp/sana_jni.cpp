@@ -37,9 +37,9 @@ MNN::Interpreter* gInterpreter = nullptr;
 MNN::Session* gSession = nullptr;
 
 
-// ------------------------------------------------------------
+// ============================================================
 // JNI STRING
-// ------------------------------------------------------------
+// ============================================================
 
 std::string jstringToString(
         JNIEnv* env,
@@ -70,9 +70,9 @@ std::string jstringToString(
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // SHAPE
-// ------------------------------------------------------------
+// ============================================================
 
 std::string formatShape(
         const MNN::Tensor* tensor) {
@@ -105,9 +105,9 @@ std::string formatShape(
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // DIMENSION TYPE
-// ------------------------------------------------------------
+// ============================================================
 
 std::string dimensionTypeName(
         MNN::Tensor::DimensionType type) {
@@ -129,9 +129,9 @@ std::string dimensionTypeName(
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // BACKEND
-// ------------------------------------------------------------
+// ============================================================
 
 std::string backendName(
         bool preferOpenCl) {
@@ -144,9 +144,9 @@ std::string backendName(
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // DESTROY INTERPRETER
-// ------------------------------------------------------------
+// ============================================================
 
 void destroyInterpreter(
         MNN::Interpreter*& interpreter) {
@@ -162,9 +162,9 @@ void destroyInterpreter(
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // GLOBAL RELEASE
-// ------------------------------------------------------------
+// ============================================================
 
 void releaseGlobalLocked() {
 
@@ -195,9 +195,9 @@ void releaseGlobalLocked() {
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // SESSION CONFIG
-// ------------------------------------------------------------
+// ============================================================
 
 MNN::ScheduleConfig makeScheduleConfig(
         bool preferOpenCl,
@@ -213,22 +213,14 @@ MNN::ScheduleConfig makeScheduleConfig(
         /*
          * GPU uses mode.
          *
-         * MNN ScheduleConfig uses a union:
-         * CPU -> numThread
-         * GPU -> mode
+         * ScheduleConfig stores CPU thread count
+         * and GPU mode in the same union.
          */
 
         config.mode =
             MNN_GPU_TUNING_HEAVY;
 
     } else {
-
-        /*
-         * CPU only needs:
-         *
-         * type
-         * numThread
-         */
 
         config.type =
             MNN_FORWARD_CPU;
@@ -241,9 +233,9 @@ MNN::ScheduleConfig makeScheduleConfig(
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // CREATE SESSION
-// ------------------------------------------------------------
+// ============================================================
 
 bool createSession(
         MNN::Interpreter* interpreter,
@@ -262,10 +254,12 @@ bool createSession(
         );
 
     /*
-     * CPU fallback for unsupported OpenCL operations.
+     * Let unsupported operations fall back to CPU
+     * when using OpenCL.
      */
 
     if (preferOpenCl) {
+
         config.backupType =
             MNN_FORWARD_CPU;
     }
@@ -288,9 +282,9 @@ bool createSession(
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // TRANSFORMER DIAGNOSTIC
-// ------------------------------------------------------------
+// ============================================================
 
 std::string runTransformerDiagnostic(
         const std::string& modelPath,
@@ -709,9 +703,360 @@ std::string runTransformerDiagnostic(
 }
 
 
-// ------------------------------------------------------------
-// VAE DIAGNOSTIC
-// ------------------------------------------------------------
+// ============================================================
+// CPU VAE ISOLATION TEST
+// ============================================================
+
+std::string runVaeCpuIsolationTest(
+        const std::string& modelPath) {
+
+    std::ostringstream result;
+
+    result
+        << "\n\n"
+        << "========================================\n"
+        << "VAE CPU ISOLATION TEST\n"
+        << "========================================\n\n";
+
+
+    result
+        << "Purpose:\n"
+        << "Determine whether the VAE model itself works\n"
+        << "independently of the OpenCL host-to-device path.\n\n";
+
+
+    result
+        << "Creating CPU interpreter...\n";
+
+
+    MNN::Interpreter* interpreter =
+        MNN::Interpreter::createFromFile(
+            modelPath.c_str()
+        );
+
+
+    if (interpreter == nullptr) {
+
+        result
+            << "FAIL: CPU VAE interpreter creation failed.";
+
+        return result.str();
+    }
+
+
+    result
+        << "CPU interpreter created.\n";
+
+
+    MNN::Session* session = nullptr;
+
+
+    if (!createSession(
+            interpreter,
+            session,
+            false,
+            4)) {
+
+        result
+            << "FAIL: CPU VAE session creation failed.";
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+
+    result
+        << "CPU session created.\n\n";
+
+
+    MNN::Tensor* input =
+        interpreter->getSessionInput(
+            session,
+            "latent"
+        );
+
+
+    if (input == nullptr) {
+
+        input =
+            interpreter->getSessionInput(
+                session,
+                nullptr
+            );
+    }
+
+
+    if (input == nullptr) {
+
+        result
+            << "FAIL: CPU VAE latent input not found.";
+
+        interpreter->releaseSession(
+            session
+        );
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+
+    result
+        << "CPU input shape: "
+        << formatShape(input)
+        << "\n";
+
+    result
+        << "CPU input elements: "
+        << input->elementSize()
+        << "\n";
+
+    result
+        << "CPU input type code: "
+        << input->getType().code
+        << "\n";
+
+    result
+        << "CPU input bytes: "
+        << input->getType().bytes()
+        << "\n";
+
+    result
+        << "CPU input dimension type: "
+        << dimensionTypeName(
+            input->getDimensionType()
+        )
+        << "\n\n";
+
+
+    std::vector<int> expectedShape = {
+        1,
+        32,
+        16,
+        16
+    };
+
+
+    if (input->shape() != expectedShape) {
+
+        result
+            << "CPU input requires resize.\n";
+
+        interpreter->resizeTensor(
+            input,
+            expectedShape
+        );
+
+        interpreter->resizeSession(
+            session
+        );
+
+        result
+            << "CPU resizeSession completed.\n";
+    }
+
+
+    result
+        << "Creating CPU host tensor...\n";
+
+
+    MNN::Tensor* hostTensor =
+        new MNN::Tensor(
+            input,
+            input->getDimensionType()
+        );
+
+
+    if (hostTensor == nullptr) {
+
+        result
+            << "FAIL: CPU host tensor creation failed.";
+
+        interpreter->releaseSession(
+            session
+        );
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+
+    float* hostData =
+        hostTensor->host<float>();
+
+
+    if (hostData == nullptr) {
+
+        result
+            << "FAIL: CPU host tensor has no memory.";
+
+        delete hostTensor;
+
+        interpreter->releaseSession(
+            session
+        );
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+
+    int count =
+        hostTensor->elementSize();
+
+
+    for (int i = 0;
+         i < count;
+         ++i) {
+
+        hostData[i] =
+            -0.05f +
+            static_cast<float>(i) *
+            0.000390625f;
+    }
+
+
+    result
+        << "CPU host tensor elements: "
+        << count
+        << "\n";
+
+
+    result
+        << "Copying CPU host tensor...\n";
+
+
+    bool copied =
+        input->copyFromHostTensor(
+            hostTensor
+        );
+
+
+    delete hostTensor;
+
+
+    result
+        << "CPU copy result: "
+        << (copied ? "SUCCESS" : "FAILED")
+        << "\n\n";
+
+
+    if (!copied) {
+
+        result
+            << "FAIL: CPU copyFromHostTensor() also failed.\n";
+
+        interpreter->releaseSession(
+            session
+        );
+
+        destroyInterpreter(
+            interpreter
+        );
+
+        return result.str();
+    }
+
+
+    result
+        << "Running CPU VAE inference...\n";
+
+
+    auto start =
+        std::chrono::steady_clock::now();
+
+
+    int errorCode =
+        interpreter->runSession(
+            session
+        );
+
+
+    auto end =
+        std::chrono::steady_clock::now();
+
+
+    double elapsed =
+        std::chrono::duration<double, std::milli>(
+            end - start
+        ).count();
+
+
+    result
+        << "CPU inference time: "
+        << elapsed
+        << " ms\n";
+
+    result
+        << "CPU error code: "
+        << errorCode
+        << "\n\n";
+
+
+    MNN::Tensor* output =
+        interpreter->getSessionOutput(
+            session,
+            nullptr
+        );
+
+
+    if (output != nullptr) {
+
+        result
+            << "CPU output shape: "
+            << formatShape(output)
+            << "\n";
+
+        result
+            << "CPU output elements: "
+            << output->elementSize()
+            << "\n";
+    }
+
+
+    if (errorCode == 0) {
+
+        result
+            << "\nCPU VAE PASS.\n"
+            << "The VAE model executes successfully on CPU.\n"
+            << "Therefore the remaining problem is specifically\n"
+            << "the OpenCL/device transfer path.\n";
+
+    } else {
+
+        result
+            << "\nCPU VAE FAIL.\n"
+            << "The problem is not limited to OpenCL transfer.\n";
+    }
+
+
+    interpreter->releaseSession(
+        session
+    );
+
+    destroyInterpreter(
+        interpreter
+    );
+
+
+    return result.str();
+}
+
+
+// ============================================================
+// VAE OPENCL DIAGNOSTIC
+// ============================================================
 
 std::string runVaeDiagnostic(
         const std::string& modelPath,
@@ -896,7 +1241,7 @@ std::string runVaeDiagnostic(
 
 
     // --------------------------------------------------------
-    // EXPECTED SANA LATENT
+    // EXPECTED SHAPE
     // --------------------------------------------------------
 
     std::vector<int> expectedShape = {
@@ -908,29 +1253,32 @@ std::string runVaeDiagnostic(
 
 
     /*
-     * Do NOT resize if already correct.
+     * Always explicitly perform the resize path for this
+     * diagnostic. This ensures the session has gone through
+     * MNN's tensor/session resize lifecycle.
      */
 
-    std::vector<int> currentShape =
-        input->shape();
+    result
+        << "Applying explicit VAE tensor resize...\n";
 
 
-    if (currentShape != expectedShape) {
-
-        result
-            << "Resizing VAE input to [1, 32, 16, 16]...\n";
-
-
-        interpreter->resizeTensor(
-            input,
-            expectedShape
-        );
+    interpreter->resizeTensor(
+        input,
+        expectedShape
+    );
 
 
-        interpreter->resizeSession(
-            session
-        );
-    }
+    result
+        << "Calling resizeSession()...\n";
+
+
+    interpreter->resizeSession(
+        session
+    );
+
+
+    result
+        << "resizeSession() completed.\n\n";
 
 
     result
@@ -972,21 +1320,36 @@ std::string runVaeDiagnostic(
 
 
     // --------------------------------------------------------
+    // WAIT DIAGNOSTIC
+    // --------------------------------------------------------
+
+    if (preferOpenCl) {
+
+        result
+            << "Testing OpenCL input wait/write state...\n";
+
+
+        int waitResult =
+            input->wait(
+                MNN::Tensor::MAP_TENSOR_WRITE,
+                true
+            );
+
+
+        result
+            << "Input wait(MAP_TENSOR_WRITE, true): "
+            << waitResult
+            << "\n\n";
+    }
+
+
+    // --------------------------------------------------------
     // HOST TENSOR
     // --------------------------------------------------------
 
     result
         << "Creating host tensor for VAE input...\n";
 
-
-    /*
-     * IMPORTANT:
-     *
-     * Use the exact dimension type of the
-     * MNN device input.
-     *
-     * We do NOT force CAFFE here.
-     */
 
     MNN::Tensor* hostTensor =
         new MNN::Tensor(
@@ -1112,11 +1475,11 @@ std::string runVaeDiagnostic(
 
 
     // --------------------------------------------------------
-    // COPY TO OPENCL
+    // OPENCL COPY
     // --------------------------------------------------------
 
     result
-        << "\nCopying host tensor to OpenCL device...\n";
+        << "\nCopying host tensor to device...\n";
 
 
     bool copied =
@@ -1162,7 +1525,8 @@ std::string runVaeDiagnostic(
 
         result
             << "\nHost-to-device transfer failed "
-               "before VAE inference.";
+               "before VAE inference.\n";
+
 
         interpreter->releaseSession(
             session
@@ -1171,6 +1535,20 @@ std::string runVaeDiagnostic(
         destroyInterpreter(
             interpreter
         );
+
+
+        /*
+         * IMPORTANT:
+         *
+         * If OpenCL failed, immediately test the same
+         * model on CPU. This is the isolation step.
+         */
+
+        result
+            << runVaeCpuIsolationTest(
+                modelPath
+            );
+
 
         return result.str();
     }
@@ -1225,6 +1603,7 @@ std::string runVaeDiagnostic(
         result
             << "FAIL: VAE inference error.";
 
+
         interpreter->releaseSession(
             session
         );
@@ -1232,6 +1611,7 @@ std::string runVaeDiagnostic(
         destroyInterpreter(
             interpreter
         );
+
 
         return result.str();
     }
@@ -1362,9 +1742,9 @@ std::string runVaeDiagnostic(
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // COMBINED TEST
-// ------------------------------------------------------------
+// ============================================================
 
 std::string runCombinedDiagnostic(
         const std::string& transformerPath,
