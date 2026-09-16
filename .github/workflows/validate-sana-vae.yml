@@ -84,13 +84,16 @@ jobs:
           print("DOWNLOADING OFFICIAL SANA 0.6B 512px")
           print("=" * 70)
 
+          print("Repository:", repo)
+
           snapshot_download(
               repo_id=repo,
               local_dir="sana_model",
               local_dir_use_symlinks=False
           )
 
-          print("Download complete.")
+          print("")
+          print("Sana model download complete.")
           PY
 
 
@@ -100,8 +103,9 @@ jobs:
 
       - name: Verify VAE files
         run: |
+          echo ""
           echo "======================================================================"
-          echo "SANA VAE TREE"
+          echo "SANA VAE FILES"
           echo "======================================================================"
 
           find sana_model/vae \
@@ -113,7 +117,6 @@ jobs:
           echo ""
 
           test -d sana_model/vae
-
           test -f sana_model/vae/config.json
 
           echo "VAE directory: OK"
@@ -131,9 +134,15 @@ jobs:
           import os
           import torch
           import onnx
+          import numpy as np
+          import onnxruntime as ort
 
           from diffusers import AutoencoderDC
 
+
+          # ==========================================================
+          # PATHS
+          # ==========================================================
 
           MODEL_DIR = "sana_model/vae"
           OUTPUT_DIR = "onnx"
@@ -144,12 +153,17 @@ jobs:
           )
 
 
+          # ==========================================================
+          # HEADER
+          # ==========================================================
+
           print("=" * 70)
           print("SANA 0.6B / 512px VAE VALIDATION")
           print("=" * 70)
 
           print("PyTorch:", torch.__version__)
           print("ONNX:", onnx.__version__)
+          print("ONNX Runtime:", ort.__version__)
 
 
           # ==========================================================
@@ -229,21 +243,27 @@ jobs:
                   return result[0]
 
 
-          decoder = SanaVAEDecoder(vae)
+          decoder = SanaVAEDecoder(
+              vae
+          )
 
           decoder.eval()
 
 
           # ==========================================================
-          # TEST LATENT
+          # STATIC 512x512 LATENT
           #
-          # Sana 512:
+          # Sana VAE:
           #
           # 512 / 32 = 16
           #
-          # latent:
+          # Input:
           #
-          # [1, 32, 16, 16]
+          # [1,32,16,16]
+          #
+          # Output:
+          #
+          # [1,3,512,512]
           # ==========================================================
 
           latent = torch.randn(
@@ -253,6 +273,21 @@ jobs:
               16,
               dtype=torch.float32
           )
+
+
+          expected_input = [
+              1,
+              32,
+              16,
+              16
+          ]
+
+          expected_output = [
+              1,
+              3,
+              512,
+              512
+          ]
 
 
           print("")
@@ -276,8 +311,16 @@ jobs:
           )
 
 
+          if list(latent.shape) != expected_input:
+
+              raise RuntimeError(
+                  "Unexpected latent shape: "
+                  + str(list(latent.shape))
+              )
+
+
           # ==========================================================
-          # RUN PYTORCH VAE FIRST
+          # PYTORCH TEST
           # ==========================================================
 
           print("")
@@ -312,12 +355,6 @@ jobs:
               float(pytorch_output.max())
           )
 
-          expected_output = [
-              1,
-              3,
-              512,
-              512
-          ]
 
           if list(pytorch_output.shape) != expected_output:
 
@@ -326,17 +363,27 @@ jobs:
                   + str(list(pytorch_output.shape))
               )
 
+
+          print("")
           print("PyTorch VAE TEST: PASS")
 
 
           # ==========================================================
           # EXPORT ONNX
+          #
+          # IMPORTANT:
+          #
+          # do_constant_folding=False
+          #
+          # This avoids the legacy ONNX exporter folding problematic
+          # Slice/shape operations in the Sana DC-AE graph.
           # ==========================================================
 
           onnx_path = (
               OUTPUT_DIR +
               "/sana_vae_decoder.onnx"
           )
+
 
           print("")
           print("=" * 70)
@@ -347,31 +394,22 @@ jobs:
 
               torch.onnx.export(
                   decoder,
-
-                  (
-                      latent,
-                  ),
-
+                  (latent,),
                   onnx_path,
-
                   input_names=[
                       "latent"
                   ],
-
                   output_names=[
                       "image"
                   ],
-
                   opset_version=17,
-
-                  do_constant_folding=True,
-
+                  do_constant_folding=False,
                   external_data=True,
-
                   verbose=False
               )
 
 
+          print("")
           print(
               "Created:",
               onnx_path
@@ -379,19 +417,175 @@ jobs:
 
 
           # ==========================================================
-          # VALIDATE ONNX
+          # CHECK ONNX FILE
           # ==========================================================
 
           print("")
           print("=" * 70)
-          print("VALIDATING ONNX")
+          print("VALIDATING RAW ONNX")
           print("=" * 70)
 
           onnx.checker.check_model(
               onnx_path
           )
 
-          print("ONNX CHECK: PASS")
+          print(
+              "ONNX CHECK: PASS"
+          )
+
+
+          # ==========================================================
+          # LOAD ONNX WITH EXTERNAL DATA
+          # ==========================================================
+
+          print("")
+          print("=" * 70)
+          print("LOADING ONNX GRAPH")
+          print("=" * 70)
+
+          model = onnx.load(
+              onnx_path,
+              load_external_data=True
+          )
+
+          print(
+              "ONNX graph loaded successfully."
+          )
+
+
+          # ==========================================================
+          # SHAPE INFERENCE
+          #
+          # This resolves intermediate tensor shapes before
+          # ONNX Runtime attempts to load the graph.
+          # ==========================================================
+
+          print("")
+          print("=" * 70)
+          print("RUNNING ONNX SHAPE INFERENCE")
+          print("=" * 70)
+
+          model = onnx.shape_inference.infer_shapes(
+              model
+          )
+
+          print(
+              "ONNX shape inference: PASS"
+          )
+
+
+          # ==========================================================
+          # SAVE SHAPE-INFERRED MODEL
+          #
+          # Save to a separate path so the original export remains
+          # available for debugging.
+          # ==========================================================
+
+          inferred_path = (
+              OUTPUT_DIR +
+              "/sana_vae_decoder_inferred.onnx"
+          )
+
+
+          onnx.save(
+              model,
+              inferred_path
+          )
+
+
+          print(
+              "Shape-inferred ONNX:",
+              inferred_path
+          )
+
+
+          # ==========================================================
+          # CHECK SHAPE-INFERRED MODEL
+          # ==========================================================
+
+          print("")
+          print("=" * 70)
+          print("CHECKING SHAPE-INFERRED ONNX")
+          print("=" * 70)
+
+          onnx.checker.check_model(
+              inferred_path
+          )
+
+          print(
+              "Shape-inferred ONNX CHECK: PASS"
+          )
+
+
+          # ==========================================================
+          # PRINT ONNX INPUTS / OUTPUTS
+          # ==========================================================
+
+          print("")
+          print("=" * 70)
+          print("ONNX GRAPH INPUTS / OUTPUTS")
+          print("=" * 70)
+
+          for value in model.graph.input:
+
+              shape = []
+
+              for dim in value.type.tensor_type.shape.dim:
+
+                  if dim.dim_value:
+
+                      shape.append(
+                          dim.dim_value
+                      )
+
+                  elif dim.dim_param:
+
+                      shape.append(
+                          dim.dim_param
+                      )
+
+                  else:
+
+                      shape.append(
+                          "?"
+                      )
+
+              print(
+                  "INPUT:",
+                  value.name,
+                  shape
+              )
+
+
+          for value in model.graph.output:
+
+              shape = []
+
+              for dim in value.type.tensor_type.shape.dim:
+
+                  if dim.dim_value:
+
+                      shape.append(
+                          dim.dim_value
+                      )
+
+                  elif dim.dim_param:
+
+                      shape.append(
+                          dim.dim_param
+                      )
+
+                  else:
+
+                      shape.append(
+                          "?"
+                      )
+
+              print(
+                  "OUTPUT:",
+                  value.name,
+                  shape
+              )
 
 
           # ==========================================================
@@ -400,36 +594,73 @@ jobs:
 
           print("")
           print("=" * 70)
-          print("ONNX RUNTIME TEST")
+          print("ONNX RUNTIME CPU TEST")
           print("=" * 70)
 
-          import numpy as np
-          import onnxruntime as ort
+          print(
+              "Loading:",
+              inferred_path
+          )
+
 
           session = ort.InferenceSession(
-              onnx_path,
+              inferred_path,
               providers=[
                   "CPUExecutionProvider"
               ]
           )
 
-          input_info = session.get_inputs()[0]
-          output_info = session.get_outputs()[0]
 
           print(
-              "ONNX input:",
-              input_info.name,
-              input_info.shape,
+              "ONNX Runtime session created."
+          )
+
+
+          input_info = (
+              session.get_inputs()[0]
+          )
+
+          output_info = (
+              session.get_outputs()[0]
+          )
+
+
+          print("")
+          print(
+              "ORT input name:",
+              input_info.name
+          )
+
+          print(
+              "ORT input shape:",
+              input_info.shape
+          )
+
+          print(
+              "ORT input type:",
               input_info.type
           )
 
+          print("")
           print(
-              "ONNX output:",
-              output_info.name,
-              output_info.shape,
+              "ORT output name:",
+              output_info.name
+          )
+
+          print(
+              "ORT output shape:",
+              output_info.shape
+          )
+
+          print(
+              "ORT output type:",
               output_info.type
           )
 
+
+          # ==========================================================
+          # RUN ORT
+          # ==========================================================
 
           latent_np = (
               latent
@@ -439,14 +670,20 @@ jobs:
           )
 
 
+          print("")
+          print("Running ONNX Runtime...")
+
+
           ort_output = session.run(
               None,
               {
-                  "latent": latent_np
+                  input_info.name:
+                      latent_np
               }
           )[0]
 
 
+          print("")
           print(
               "ORT output shape:",
               list(ort_output.shape)
@@ -476,14 +713,27 @@ jobs:
               )
 
 
+          print("")
+          print(
+              "ONNX Runtime output shape: PASS"
+          )
+
+
           # ==========================================================
           # PYTORCH VS ONNX
           # ==========================================================
+
+          print("")
+          print("=" * 70)
+          print("PYTORCH VS ONNX COMPARISON")
+          print("=" * 70)
+
 
           pytorch_np = (
               pytorch_output
               .cpu()
               .numpy()
+              .astype(np.float32)
           )
 
 
@@ -493,15 +743,23 @@ jobs:
           )
 
 
-          print("")
+          max_difference = float(
+              difference.max()
+          )
+
+          mean_difference = float(
+              difference.mean()
+          )
+
+
           print(
               "Maximum absolute difference:",
-              float(difference.max())
+              max_difference
           )
 
           print(
               "Mean absolute difference:",
-              float(difference.mean())
+              mean_difference
           )
 
 
@@ -523,7 +781,7 @@ jobs:
 
 
           # ==========================================================
-          # FINAL
+          # FINAL RESULT
           # ==========================================================
 
           print("")
@@ -533,11 +791,15 @@ jobs:
 
           print("")
           print("RESULT:")
-          print("PyTorch VAE       : PASS")
-          print("ONNX export       : PASS")
-          print("ONNX checker      : PASS")
-          print("ONNX Runtime CPU  : PASS")
-          print("Output            : [1,3,512,512]")
+          print("")
+          print("PyTorch VAE      : PASS")
+          print("ONNX export      : PASS")
+          print("ONNX checker     : PASS")
+          print("Shape inference  : PASS")
+          print("ONNX Runtime CPU : PASS")
+          print("Output           : [1,3,512,512]")
+          print("")
+          print("NEXT STEP: MNN CONVERSION")
           print("")
 
 
@@ -545,7 +807,7 @@ jobs:
 
 
       # ============================================================
-      # RUN EXPORT + ONNX VALIDATION
+      # RUN PYTORCH + ONNX VALIDATION
       # ============================================================
 
       - name: Export and validate VAE
@@ -620,18 +882,20 @@ jobs:
             | head -1)
 
           if [ -z "$MNN_CONVERT" ]; then
-            echo "ERROR: MNNConvert not found."
+            echo "ERROR: MNNConvert was not found."
             exit 1
           fi
 
-          echo "$MNN_CONVERT" > mnn_converter_path.txt
+          echo "$MNN_CONVERT" \
+            > mnn_converter_path.txt
 
-          echo "MNNConvert:"
+          echo ""
+          echo "MNNConvert found:"
           echo "$MNN_CONVERT"
 
 
       # ============================================================
-      # CONVERT VAE
+      # CONVERT VAE TO MNN FP32
       # ============================================================
 
       - name: Convert VAE ONNX to MNN FP32
@@ -642,24 +906,24 @@ jobs:
 
           echo ""
           echo "======================================================================"
-          echo "CONVERTING VAE TO MNN FP32"
+          echo "CONVERTING SANA VAE TO MNN FP32"
           echo "======================================================================"
 
           "$MNN_CONVERT" \
             -f ONNX \
-            --modelFile onnx/sana_vae_decoder.onnx \
+            --modelFile onnx/sana_vae_decoder_inferred.onnx \
             --MNNModel mnn_models/sana_vae_decoder_fp32.mnn \
             --optimizePrefer=2
 
           echo ""
-          echo "MNN VAE created."
+          echo "MNN VAE conversion finished."
 
           ls -lh \
             mnn_models/sana_vae_decoder_fp32.mnn
 
 
       # ============================================================
-      # DOWNLOAD MNN CLI / BUILD TEST PROGRAM
+      # CREATE MNN CPU TEST
       # ============================================================
 
       - name: Create MNN VAE CPU test
@@ -669,14 +933,17 @@ jobs:
           #include <MNN/Interpreter.hpp>
           #include <MNN/Tensor.hpp>
 
-          #include <cmath>
-          #include <cstring>
+          #include <algorithm>
           #include <iostream>
-          #include <vector>
 
-          int main(int argc, char** argv) {
+
+          int main(
+              int argc,
+              char** argv
+          ) {
 
               if (argc < 2) {
+
                   std::cerr
                       << "Usage: test_mnn_vae <model.mnn>"
                       << std::endl;
@@ -684,7 +951,10 @@ jobs:
                   return 1;
               }
 
-              const char* modelPath = argv[1];
+
+              const char* modelPath =
+                  argv[1];
+
 
               std::cout
                   << "============================================================"
@@ -698,26 +968,41 @@ jobs:
                   << "============================================================"
                   << std::endl;
 
+
               std::cout
                   << "Model: "
                   << modelPath
                   << std::endl;
 
 
+              // ----------------------------------------------------
+              // CREATE INTERPRETER
+              // ----------------------------------------------------
+
               auto interpreter =
                   MNN::Interpreter::createFromFile(
                       modelPath
                   );
 
+
               if (interpreter == nullptr) {
 
                   std::cerr
-                      << "FAIL: Could not create interpreter."
+                      << "FAIL: Could not create MNN interpreter."
                       << std::endl;
 
                   return 2;
               }
 
+
+              std::cout
+                  << "Interpreter: PASS"
+                  << std::endl;
+
+
+              // ----------------------------------------------------
+              // CPU SESSION
+              // ----------------------------------------------------
 
               MNN::ScheduleConfig config;
 
@@ -731,6 +1016,7 @@ jobs:
                   interpreter->createSession(
                       config
                   );
+
 
               if (session == nullptr) {
 
@@ -746,11 +1032,21 @@ jobs:
               }
 
 
+              std::cout
+                  << "CPU session: PASS"
+                  << std::endl;
+
+
+              // ----------------------------------------------------
+              // INPUT
+              // ----------------------------------------------------
+
               auto input =
                   interpreter->getSessionInput(
                       session,
                       nullptr
                   );
+
 
               if (input == nullptr) {
 
@@ -773,9 +1069,12 @@ jobs:
               std::cout
                   << "Input shape: [";
 
-              for (int i = 0;
-                   i < input->dimensions();
-                   ++i) {
+
+              for (
+                  int i = 0;
+                  i < input->dimensions();
+                  ++i
+              ) {
 
                   if (i > 0)
                       std::cout << ",";
@@ -783,6 +1082,7 @@ jobs:
                   std::cout
                       << input->length(i);
               }
+
 
               std::cout
                   << "]"
@@ -793,12 +1093,16 @@ jobs:
                   1 * 32 * 16 * 16;
 
 
-              if (input->elementSize()
-                  != expectedElements) {
+              if (
+                  input->dimensions() != 4 ||
+                  input->length(0) != 1 ||
+                  input->length(1) != 32 ||
+                  input->length(2) != 16 ||
+                  input->length(3) != 16
+              ) {
 
                   std::cerr
-                      << "FAIL: Unexpected input element count: "
-                      << input->elementSize()
+                      << "FAIL: Unexpected MNN input shape."
                       << std::endl;
 
                   interpreter->releaseSession(
@@ -813,11 +1117,16 @@ jobs:
               }
 
 
+              std::cout
+                  << "Input shape check: PASS"
+                  << std::endl;
+
+
               // ----------------------------------------------------
-              // Host tensor
+              // HOST TENSOR
               // ----------------------------------------------------
 
-              MNN::Tensor host(
+              MNN::Tensor hostTensor(
                   input,
                   MNN::Tensor::CAFFE,
                   true
@@ -825,13 +1134,13 @@ jobs:
 
 
               float* data =
-                  host.host<float>();
+                  hostTensor.host<float>();
 
 
               if (data == nullptr) {
 
                   std::cerr
-                      << "FAIL: Host pointer is null."
+                      << "FAIL: Host tensor pointer is null."
                       << std::endl;
 
                   interpreter->releaseSession(
@@ -845,6 +1154,10 @@ jobs:
                   return 6;
               }
 
+
+              // ----------------------------------------------------
+              // FILL LATENT
+              // ----------------------------------------------------
 
               for (
                   int i = 0;
@@ -860,17 +1173,28 @@ jobs:
 
 
               std::cout
-                  << "Latent[0]: "
+                  << "Latent sample: "
                   << data[0]
+                  << ", "
+                  << data[1]
+                  << ", "
+                  << data[2]
+                  << ", "
+                  << data[3]
                   << std::endl;
 
 
               // ----------------------------------------------------
-              // Copy host -> MNN CPU input
+              // COPY HOST -> MNN
               // ----------------------------------------------------
 
+              std::cout
+                  << "Copying host tensor to MNN input..."
+                  << std::endl;
+
+
               input->copyFromHostTensor(
-                  &host
+                  &hostTensor
               );
 
 
@@ -880,8 +1204,13 @@ jobs:
 
 
               // ----------------------------------------------------
-              // Run
+              // RUN INFERENCE
               // ----------------------------------------------------
+
+              std::cout
+                  << "Running MNN CPU inference..."
+                  << std::endl;
+
 
               auto result =
                   interpreter->runSession(
@@ -895,7 +1224,9 @@ jobs:
                   << std::endl;
 
 
-              if (result != MNN::NO_ERROR) {
+              if (
+                  result != MNN::NO_ERROR
+              ) {
 
                   std::cerr
                       << "FAIL: MNN inference failed."
@@ -913,8 +1244,13 @@ jobs:
               }
 
 
+              std::cout
+                  << "MNN inference: PASS"
+                  << std::endl;
+
+
               // ----------------------------------------------------
-              // Output
+              // OUTPUT
               // ----------------------------------------------------
 
               auto output =
@@ -945,9 +1281,12 @@ jobs:
               std::cout
                   << "Output shape: [";
 
-              for (int i = 0;
-                   i < output->dimensions();
-                   ++i) {
+
+              for (
+                  int i = 0;
+                  i < output->dimensions();
+                  ++i
+              ) {
 
                   if (i > 0)
                       std::cout << ",";
@@ -956,23 +1295,14 @@ jobs:
                       << output->length(i);
               }
 
+
               std::cout
                   << "]"
                   << std::endl;
 
 
-              int outputElements =
-                  output->elementSize();
-
-
-              std::cout
-                  << "Output elements: "
-                  << outputElements
-                  << std::endl;
-
-
               // ----------------------------------------------------
-              // Expected output
+              // OUTPUT SHAPE CHECK
               // ----------------------------------------------------
 
               if (
@@ -984,7 +1314,7 @@ jobs:
               ) {
 
                   std::cerr
-                      << "FAIL: Unexpected output shape."
+                      << "FAIL: Unexpected MNN output shape."
                       << std::endl;
 
                   interpreter->releaseSession(
@@ -1005,7 +1335,7 @@ jobs:
 
 
               // ----------------------------------------------------
-              // Stage output to host
+              // OUTPUT HOST TENSOR
               // ----------------------------------------------------
 
               MNN::Tensor outputHost(
@@ -1042,10 +1372,8 @@ jobs:
               }
 
 
-              std::cout
-                  << "Output[0]: "
-                  << outputData[0]
-                  << std::endl;
+              const int outputElements =
+                  output->elementSize();
 
 
               float minValue =
@@ -1076,9 +1404,22 @@ jobs:
 
 
               std::cout
+                  << "Output elements: "
+                  << outputElements
+                  << std::endl;
+
+
+              std::cout
+                  << "Output[0]: "
+                  << outputData[0]
+                  << std::endl;
+
+
+              std::cout
                   << "Output min: "
                   << minValue
                   << std::endl;
+
 
               std::cout
                   << "Output max: "
@@ -1087,7 +1428,7 @@ jobs:
 
 
               // ----------------------------------------------------
-              // Final
+              // FINAL
               // ----------------------------------------------------
 
               std::cout
@@ -1115,6 +1456,7 @@ jobs:
                   interpreter
               );
 
+
               return 0;
           }
 
@@ -1122,10 +1464,10 @@ jobs:
 
 
       # ============================================================
-      # BUILD CPU TEST
+      # BUILD MNN CPU TEST
       # ============================================================
 
-      - name: Build MNN CPU VAE test
+      - name: Build MNN VAE CPU test
         run: |
           g++ \
             -std=c++17 \
@@ -1138,29 +1480,46 @@ jobs:
             -ldl \
             -o test_mnn_vae
 
-          echo "MNN CPU test built."
+          echo "MNN CPU test executable created."
 
 
       # ============================================================
-      # RUN MNN CPU VAE TEST
+      # RUN MNN CPU TEST
       # ============================================================
 
-      - name: Run MNN CPU VAE test
+      - name: Run MNN VAE CPU test
         run: |
           ./test_mnn_vae \
             mnn_models/sana_vae_decoder_fp32.mnn
 
 
       # ============================================================
-      # FINAL FILE REPORT
+      # FINAL REPORT
       # ============================================================
 
-      - name: Print generated files
+      - name: Print final VAE validation report
         run: |
           echo ""
           echo "======================================================================"
-          echo "GENERATED VAE FILES"
+          echo "SANA VAE VALIDATION FINAL REPORT"
           echo "======================================================================"
+
+          echo ""
+          echo "Expected pipeline:"
+          echo ""
+          echo "PyTorch"
+          echo "   ↓"
+          echo "ONNX"
+          echo "   ↓"
+          echo "ONNX Runtime CPU"
+          echo "   ↓"
+          echo "MNN FP32"
+          echo "   ↓"
+          echo "MNN CPU"
+          echo ""
+
+          echo "Generated files:"
+          echo ""
 
           find onnx mnn_models \
             -type f \
@@ -1171,14 +1530,3 @@ jobs:
           echo "======================================================================"
           echo "SANA VAE VALIDATION FINISHED"
           echo "======================================================================"
-
-          echo ""
-          echo "If this workflow is GREEN:"
-          echo ""
-          echo "PyTorch VAE       = WORKING"
-          echo "ONNX              = WORKING"
-          echo "ONNX Runtime      = WORKING"
-          echo "MNN conversion    = WORKING"
-          echo "MNN CPU inference = WORKING"
-          echo ""
-          echo "The remaining problem is Android/MNN OpenCL integration."
