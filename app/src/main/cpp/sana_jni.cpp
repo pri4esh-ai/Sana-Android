@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -16,7 +17,6 @@
 #include <vector>
 
 #define LOG_TAG "SanaNative"
-
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
@@ -25,28 +25,23 @@ namespace {
 std::mutex gMutex;
 
 bool gInitialized = false;
-
-std::string gBackend = "Not initialized";
+std::string gBackend = "NONE";
 std::string gStatus = "Not initialized";
 
 MNN::Interpreter* gInterpreter = nullptr;
 MNN::Session* gSession = nullptr;
 
 
-// ============================================================
-// BASIC HELPERS
-// ============================================================
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
 
-std::string jstringToString(
-        JNIEnv* env,
-        jstring value) {
-
+std::string jstringToString(JNIEnv* env, jstring value) {
     if (value == nullptr) {
         return "";
     }
 
-    const char* chars =
-            env->GetStringUTFChars(value, nullptr);
+    const char* chars = env->GetStringUTFChars(value, nullptr);
 
     if (chars == nullptr) {
         return "";
@@ -60,26 +55,17 @@ std::string jstringToString(
 }
 
 
-std::string formatShape(
-        const MNN::Tensor* tensor) {
-
-    if (tensor == nullptr) {
-        return "null";
-    }
-
+std::string formatShape(const std::vector<int>& shape) {
     std::ostringstream out;
 
     out << "[";
 
-    for (int i = 0;
-         i < tensor->dimensions();
-         ++i) {
-
+    for (size_t i = 0; i < shape.size(); ++i) {
         if (i > 0) {
             out << ", ";
         }
 
-        out << tensor->length(i);
+        out << shape[i];
     }
 
     out << "]";
@@ -88,80 +74,81 @@ std::string formatShape(
 }
 
 
-std::string dimensionTypeName(
-        MNN::Tensor::DimensionType type) {
-
-    switch (type) {
-
-        case MNN::Tensor::TENSORFLOW:
-            return "TENSORFLOW / NHWC";
-
-        case MNN::Tensor::CAFFE:
-            return "CAFFE / NCHW";
-
-        case MNN::Tensor::CAFFE_C4:
-            return "CAFFE_C4";
-
-        default:
-            return "UNKNOWN";
-    }
-}
-
-
-long long getFileSize(
-        const std::string& path) {
-
-    std::ifstream file(
-            path,
-            std::ios::binary |
-            std::ios::ate);
+long long getFileSize(const std::string& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
 
     if (!file.good()) {
         return -1;
     }
 
-    return static_cast<long long>(
-            file.tellg());
+    return static_cast<long long>(file.tellg());
 }
 
 
-// ============================================================
-// MNN SESSION CONFIG
-// ============================================================
+bool isFiniteFloat(float value) {
+    return std::isfinite(value);
+}
 
-MNN::ScheduleConfig makeScheduleConfig(
-        bool useOpenCl,
-        int cpuThreads) {
+
+// ------------------------------------------------------------
+// Session configuration
+// ------------------------------------------------------------
+
+MNN::ScheduleConfig makeCpuScheduleConfig(int cpuThreads = 4) {
 
     MNN::ScheduleConfig config;
 
-    if (useOpenCl) {
-
-        config.type =
-                MNN_FORWARD_OPENCL;
-
-        config.mode =
-                MNN_GPU_TUNING_HEAVY;
-
-        config.backupType =
-                MNN_FORWARD_CPU;
-
-    } else {
-
-        config.type =
-                MNN_FORWARD_CPU;
-
-        config.numThread =
-                cpuThreads;
-    }
+    config.type = MNN_FORWARD_CPU;
+    config.numThread = cpuThreads;
 
     return config;
 }
 
 
-MNN::Session* createSession(
+MNN::ScheduleConfig makeOpenClScheduleConfig() {
+
+    MNN::ScheduleConfig config;
+
+    config.type = MNN_FORWARD_OPENCL;
+    config.numThread = 4;
+
+    config.mode = MNN_GPU_TUNING_HEAVY;
+
+    // If an OpenCL operation is unsupported,
+    // allow MNN to fall back to CPU.
+    config.backupType = MNN_FORWARD_CPU;
+
+    return config;
+}
+
+
+// ------------------------------------------------------------
+// Cleanup
+// ------------------------------------------------------------
+
+void releaseGlobalSession() {
+
+    if (gInterpreter != nullptr && gSession != nullptr) {
+        gInterpreter->releaseSession(gSession);
+        gSession = nullptr;
+    }
+
+    if (gInterpreter != nullptr) {
+        delete gInterpreter;
+        gInterpreter = nullptr;
+    }
+
+    gInitialized = false;
+    gBackend = "NONE";
+}
+
+
+// ------------------------------------------------------------
+// Create CPU session
+// ------------------------------------------------------------
+
+MNN::Session* createCpuSession(
         MNN::Interpreter* interpreter,
-        bool useOpenCl,
         int cpuThreads = 4) {
 
     if (interpreter == nullptr) {
@@ -169,1240 +156,291 @@ MNN::Session* createSession(
     }
 
     MNN::ScheduleConfig config =
-            makeScheduleConfig(
-                    useOpenCl,
-                    cpuThreads);
+            makeCpuScheduleConfig(cpuThreads);
 
     return interpreter->createSession(config);
 }
 
 
-// ============================================================
-// CLEANUP
-// ============================================================
+// ------------------------------------------------------------
+// Create OpenCL session
+// ------------------------------------------------------------
 
-void destroyInterpreter(
-        MNN::Interpreter*& interpreter,
-        MNN::Session*& session) {
+MNN::Session* createOpenClSession(
+        MNN::Interpreter* interpreter) {
 
     if (interpreter == nullptr) {
-        return;
+        return nullptr;
     }
 
-    if (session != nullptr) {
+    MNN::ScheduleConfig config =
+            makeOpenClScheduleConfig();
 
-        interpreter->releaseSession(session);
-
-        session = nullptr;
-    }
-
-    delete interpreter;
-
-    interpreter = nullptr;
+    return interpreter->createSession(config);
 }
 
 
-void releaseGlobalLocked() {
+// ------------------------------------------------------------
+// Transformer diagnostic
+// ------------------------------------------------------------
 
-    if (gInterpreter != nullptr) {
-
-        if (gSession != nullptr) {
-
-            gInterpreter->releaseSession(
-                    gSession);
-
-            gSession = nullptr;
-        }
-
-        delete gInterpreter;
-
-        gInterpreter = nullptr;
-    }
-
-    gInitialized = false;
-
-    gBackend =
-            "Not initialized";
-
-    gStatus =
-            "Released";
-}
-
-
-// ============================================================
-// GENERIC VAE CPU TEST
-// ============================================================
-
-std::string runVaeCpuTest(
-        const std::string& vaePath) {
+std::string runTransformerCpuTest(
+        const std::string& transformerPath) {
 
     std::ostringstream report;
 
-    report
-            << "========================================\n"
-            << "SANA VAE FP16 CPU TEST\n"
-            << "========================================\n\n";
+    report << "============================================\n";
+    report << "SANA TRANSFORMER CPU TEST\n";
+    report << "============================================\n";
 
+    report << "Model:\n";
+    report << transformerPath << "\n";
 
-    // --------------------------------------------------------
-    // FILE
-    // --------------------------------------------------------
-
-    report
-            << "Model:\n"
-            << vaePath
-            << "\n\n";
-
-
-    long long fileSize =
-            getFileSize(vaePath);
-
-
-    report
-            << "File size: "
-            << fileSize
-            << " bytes\n\n";
-
+    long long fileSize = getFileSize(transformerPath);
 
     if (fileSize <= 0) {
 
-        report
-                << "FAIL: VAE file not found or empty.\n";
+        report << "File: FAIL\n";
+        report << "File does not exist or is empty.\n";
 
         return report.str();
     }
 
-
-    // --------------------------------------------------------
-    // INTERPRETER
-    // --------------------------------------------------------
-
-    report
-            << "Creating MNN interpreter...\n";
+    report << "File size: "
+           << fileSize
+           << " bytes\n\n";
 
 
-    auto startInterpreter =
+    auto createStart =
             std::chrono::steady_clock::now();
-
-
-    MNN::Interpreter* interpreter =
-            MNN::Interpreter::createFromFile(
-                    vaePath.c_str());
-
-
-    auto endInterpreter =
-            std::chrono::steady_clock::now();
-
-
-    double interpreterMs =
-            std::chrono::duration<
-                    double,
-                    std::milli>(
-                            endInterpreter -
-                            startInterpreter)
-            .count();
-
-
-    report
-            << "Interpreter creation time: "
-            << interpreterMs
-            << " ms\n";
-
-
-    if (interpreter == nullptr) {
-
-        report
-                << "FAIL: Could not create VAE interpreter.\n";
-
-        return report.str();
-    }
-
-
-    report
-            << "Interpreter: PASS\n\n";
-
-
-    // --------------------------------------------------------
-    // SESSION
-    // --------------------------------------------------------
-
-    report
-            << "Creating CPU session...\n";
-
-
-    auto startSession =
-            std::chrono::steady_clock::now();
-
-
-    MNN::Session* session =
-            createSession(
-                    interpreter,
-                    false,
-                    4);
-
-
-    auto endSession =
-            std::chrono::steady_clock::now();
-
-
-    double sessionMs =
-            std::chrono::duration<
-                    double,
-                    std::milli>(
-                            endSession -
-                            startSession)
-            .count();
-
-
-    report
-            << "Session creation time: "
-            << sessionMs
-            << " ms\n";
-
-
-    if (session == nullptr) {
-
-        report
-                << "FAIL: Could not create CPU session.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "CPU session: PASS\n\n";
-
-
-    // --------------------------------------------------------
-    // INPUT
-    // --------------------------------------------------------
-
-    MNN::Tensor* input =
-            interpreter->getSessionInput(
-                    session,
-                    "latent");
-
-
-    if (input == nullptr) {
-
-        input =
-                interpreter->getSessionInput(
-                        session,
-                        nullptr);
-    }
-
-
-    if (input == nullptr) {
-
-        report
-                << "FAIL: VAE input not found.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Input shape: "
-            << formatShape(input)
-            << "\n";
-
-
-    report
-            << "Input elements: "
-            << input->elementSize()
-            << "\n";
-
-
-    report
-            << "Input type bytes: "
-            << input->getType().bytes()
-            << "\n";
-
-
-    report
-            << "Input format: "
-            << dimensionTypeName(
-                    input->getDimensionType())
-            << "\n\n";
-
-
-    // --------------------------------------------------------
-    // EXACT SANA LATENT SHAPE
-    // --------------------------------------------------------
-
-    bool correctShape =
-            input->dimensions() == 4 &&
-            input->length(0) == 1 &&
-            input->length(1) == 32 &&
-            input->length(2) == 16 &&
-            input->length(3) == 16;
-
-
-    if (!correctShape) {
-
-        report
-                << "FAIL: Wrong VAE input shape.\n";
-
-        report
-                << "Expected: [1,32,16,16]\n";
-
-        report
-                << "Actual: "
-                << formatShape(input)
-                << "\n";
-
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Input shape: PASS\n\n";
-
-
-    // --------------------------------------------------------
-    // HOST TENSOR
-    // --------------------------------------------------------
-
-    report
-            << "Creating host tensor...\n";
-
-
-    MNN::Tensor hostTensor(
-            input,
-            MNN::Tensor::CAFFE,
-            true);
-
-
-    float* data =
-            hostTensor.host<float>();
-
-
-    if (data == nullptr) {
-
-        report
-                << "FAIL: Host tensor allocation failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Host tensor: PASS\n";
-
-
-    // --------------------------------------------------------
-    // LATENT DATA
-    // --------------------------------------------------------
-
-    const int elements =
-            hostTensor.elementSize();
-
-
-    for (int i = 0;
-         i < elements;
-         ++i) {
-
-        data[i] =
-                -0.05f +
-                (
-                    static_cast<float>(
-                            i % 256)
-                    / 255.0f
-                ) * 0.10f;
-    }
-
-
-    report
-            << "Latent sample: "
-            << data[0]
-            << ", "
-            << data[1]
-            << ", "
-            << data[2]
-            << ", "
-            << data[3]
-            << "\n\n";
-
-
-    // --------------------------------------------------------
-    // HOST -> DEVICE
-    // --------------------------------------------------------
-
-    report
-            << "Copying latent to MNN...\n";
-
-
-    bool copied =
-            input->copyFromHostTensor(
-                    &hostTensor);
-
-
-    if (!copied) {
-
-        report
-                << "FAIL: Host -> device copy failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Host -> MNN: PASS\n\n";
-
-
-    // --------------------------------------------------------
-    // INFERENCE
-    // --------------------------------------------------------
-
-    report
-            << "Running VAE inference...\n";
-
-
-    auto startInference =
-            std::chrono::steady_clock::now();
-
-
-    MNN::ErrorCode result =
-            interpreter->runSession(
-                    session);
-
-
-    auto endInference =
-            std::chrono::steady_clock::now();
-
-
-    double inferenceMs =
-            std::chrono::duration<
-                    double,
-                    std::milli>(
-                            endInference -
-                            startInference)
-            .count();
-
-
-    report
-            << "Inference time: "
-            << inferenceMs
-            << " ms\n";
-
-
-    report
-            << "MNN error code: "
-            << static_cast<int>(
-                    result)
-            << "\n\n";
-
-
-    if (result != MNN::NO_ERROR) {
-
-        report
-                << "FAIL: VAE inference failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Inference: PASS\n\n";
-
-
-    // --------------------------------------------------------
-    // OUTPUT
-    // --------------------------------------------------------
-
-    MNN::Tensor* output =
-            interpreter->getSessionOutput(
-                    session,
-                    nullptr);
-
-
-    if (output == nullptr) {
-
-        report
-                << "FAIL: VAE output not found.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Output shape: "
-            << formatShape(output)
-            << "\n";
-
-
-    report
-            << "Output elements: "
-            << output->elementSize()
-            << "\n\n";
-
-
-    bool correctOutput =
-            output->dimensions() == 4 &&
-            output->length(0) == 1 &&
-            output->length(1) == 3 &&
-            output->length(2) == 512 &&
-            output->length(3) == 512;
-
-
-    if (!correctOutput) {
-
-        report
-                << "FAIL: Wrong VAE output shape.\n";
-
-        report
-                << "Expected: [1,3,512,512]\n";
-
-        report
-                << "Actual: "
-                << formatShape(output)
-                << "\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Output shape: PASS\n\n";
-
-
-    // --------------------------------------------------------
-    // OUTPUT COPY
-    // --------------------------------------------------------
-
-    MNN::Tensor outputHost(
-            output,
-            MNN::Tensor::CAFFE,
-            true);
-
-
-    output->copyToHostTensor(
-            &outputHost);
-
-
-    float* outputData =
-            outputHost.host<float>();
-
-
-    if (outputData != nullptr) {
-
-        float minValue =
-                outputData[0];
-
-        float maxValue =
-                outputData[0];
-
-
-        for (int i = 1;
-             i < outputHost.elementSize();
-             ++i) {
-
-            minValue =
-                    std::min(
-                            minValue,
-                            outputData[i]);
-
-            maxValue =
-                    std::max(
-                            maxValue,
-                            outputData[i]);
-        }
-
-
-        report
-                << "Output[0]: "
-                << outputData[0]
-                << "\n";
-
-
-        report
-                << "Output min: "
-                << minValue
-                << "\n";
-
-
-        report
-                << "Output max: "
-                << maxValue
-                << "\n\n";
-    }
-
-
-    report
-            << "========================================\n"
-            << "VAE FP16 CPU TEST: PASS\n"
-            << "========================================\n";
-
-
-    destroyInterpreter(
-            interpreter,
-            session);
-
-
-    return report.str();
-}
-
-
-// ============================================================
-// VAE OPENCL TEST
-// ============================================================
-
-std::string runVaeOpenClTest(
-        const std::string& vaePath) {
-
-    std::ostringstream report;
-
-    report
-            << "========================================\n"
-            << "SANA VAE OPENCL TEST\n"
-            << "========================================\n\n";
-
-
-    long long fileSize =
-            getFileSize(vaePath);
-
-
-    report
-            << "Model file size: "
-            << fileSize
-            << " bytes\n\n";
-
-
-    if (fileSize <= 0) {
-
-        report
-                << "FAIL: VAE file not found.\n";
-
-        return report.str();
-    }
-
-
-    report
-            << "Creating MNN interpreter...\n";
-
-
-    MNN::Interpreter* interpreter =
-            MNN::Interpreter::createFromFile(
-                    vaePath.c_str());
-
-
-    if (interpreter == nullptr) {
-
-        report
-                << "FAIL: OpenCL interpreter creation failed.\n";
-
-        return report.str();
-    }
-
-
-    report
-            << "Interpreter: PASS\n\n";
-
-
-    report
-            << "Creating OpenCL session...\n";
-
-
-    auto start =
-            std::chrono::steady_clock::now();
-
-
-    MNN::Session* session =
-            createSession(
-                    interpreter,
-                    true,
-                    4);
-
-
-    auto end =
-            std::chrono::steady_clock::now();
-
-
-    double sessionMs =
-            std::chrono::duration<
-                    double,
-                    std::milli>(
-                            end - start)
-            .count();
-
-
-    report
-            << "OpenCL session creation time: "
-            << sessionMs
-            << " ms\n";
-
-
-    if (session == nullptr) {
-
-        report
-                << "FAIL: OpenCL session creation failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "OpenCL session: PASS\n\n";
-
-
-    MNN::Tensor* input =
-            interpreter->getSessionInput(
-                    session,
-                    "latent");
-
-
-    if (input == nullptr) {
-
-        input =
-                interpreter->getSessionInput(
-                        session,
-                        nullptr);
-    }
-
-
-    if (input == nullptr) {
-
-        report
-                << "FAIL: OpenCL VAE input not found.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Input shape: "
-            << formatShape(input)
-            << "\n";
-
-
-    bool correctShape =
-            input->dimensions() == 4 &&
-            input->length(0) == 1 &&
-            input->length(1) == 32 &&
-            input->length(2) == 16 &&
-            input->length(3) == 16;
-
-
-    if (!correctShape) {
-
-        report
-                << "FAIL: OpenCL input shape incorrect.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    MNN::Tensor hostTensor(
-            input,
-            MNN::Tensor::CAFFE,
-            true);
-
-
-    float* data =
-            hostTensor.host<float>();
-
-
-    if (data == nullptr) {
-
-        report
-                << "FAIL: OpenCL host tensor allocation failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    int elements =
-            hostTensor.elementSize();
-
-
-    for (int i = 0;
-         i < elements;
-         ++i) {
-
-        data[i] =
-                -0.05f +
-                (
-                    static_cast<float>(
-                            i % 256)
-                    / 255.0f
-                ) * 0.10f;
-    }
-
-
-    if (!input->copyFromHostTensor(
-                &hostTensor)) {
-
-        report
-                << "FAIL: OpenCL input copy failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Host -> OpenCL: PASS\n\n";
-
-
-    report
-            << "Running OpenCL VAE inference...\n";
-
-
-    auto startInference =
-            std::chrono::steady_clock::now();
-
-
-    MNN::ErrorCode result =
-            interpreter->runSession(
-                    session);
-
-
-    auto endInference =
-            std::chrono::steady_clock::now();
-
-
-    double inferenceMs =
-            std::chrono::duration<
-                    double,
-                    std::milli>(
-                            endInference -
-                            startInference)
-            .count();
-
-
-    report
-            << "Inference time: "
-            << inferenceMs
-            << " ms\n";
-
-
-    report
-            << "MNN error code: "
-            << static_cast<int>(
-                    result)
-            << "\n\n";
-
-
-    if (result != MNN::NO_ERROR) {
-
-        report
-                << "FAIL: OpenCL VAE inference failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    MNN::Tensor* output =
-            interpreter->getSessionOutput(
-                    session,
-                    nullptr);
-
-
-    if (output == nullptr) {
-
-        report
-                << "FAIL: OpenCL output not found.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Output shape: "
-            << formatShape(output)
-            << "\n";
-
-
-    bool correctOutput =
-            output->dimensions() == 4 &&
-            output->length(0) == 1 &&
-            output->length(1) == 3 &&
-            output->length(2) == 512 &&
-            output->length(3) == 512;
-
-
-    if (!correctOutput) {
-
-        report
-                << "FAIL: OpenCL output shape incorrect.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Output shape: PASS\n\n";
-
-
-    report
-            << "========================================\n"
-            << "VAE OPENCL TEST: PASS\n"
-            << "========================================\n";
-
-
-    destroyInterpreter(
-            interpreter,
-            session);
-
-
-    return report.str();
-}
-
-
-// ============================================================
-// TRANSFORMER DIAGNOSTIC
-// ============================================================
-
-std::string runTransformerDiagnostic(
-        const std::string& transformerPath,
-        const std::string& cachePath,
-        bool preferOpenCl) {
-
-    (void)cachePath;
-
-    std::ostringstream report;
-
-    report
-            << "SANA 0.6B / 512 TRANSFORMER TEST\n\n";
-
-
-    long long fileSize =
-            getFileSize(transformerPath);
-
-
-    report
-            << "Transformer file size: "
-            << fileSize
-            << " bytes\n\n";
-
-
-    if (fileSize <= 0) {
-
-        report
-                << "FAIL: Transformer file not found.\n";
-
-        return report.str();
-    }
-
 
     MNN::Interpreter* interpreter =
             MNN::Interpreter::createFromFile(
                     transformerPath.c_str());
 
+    auto createEnd =
+            std::chrono::steady_clock::now();
+
+    double createMs =
+            std::chrono::duration<double, std::milli>(
+                    createEnd - createStart).count();
+
+    report << "Creating MNN interpreter...\n";
+
+    report << "Interpreter creation time: "
+           << createMs
+           << " ms\n";
+
 
     if (interpreter == nullptr) {
 
-        report
-                << "FAIL: Transformer interpreter creation failed.\n";
+        report << "Interpreter: FAIL\n";
 
         return report.str();
     }
 
+    report << "Interpreter: PASS\n";
 
-    report
-            << "Transformer interpreter: PASS\n";
 
+    auto sessionStart =
+            std::chrono::steady_clock::now();
 
     MNN::Session* session =
-            createSession(
-                    interpreter,
-                    preferOpenCl,
-                    4);
+            createCpuSession(interpreter, 4);
+
+    auto sessionEnd =
+            std::chrono::steady_clock::now();
+
+    double sessionMs =
+            std::chrono::duration<double, std::milli>(
+                    sessionEnd - sessionStart).count();
+
+    report << "Creating CPU session...\n";
+
+    report << "Session creation time: "
+           << sessionMs
+           << " ms\n";
 
 
     if (session == nullptr) {
 
-        report
-                << "FAIL: Transformer session creation failed.\n";
+        report << "CPU session: FAIL\n";
 
-        destroyInterpreter(
-                interpreter,
-                session);
+        delete interpreter;
 
         return report.str();
     }
 
-
-    report
-            << "Transformer session: PASS\n\n";
+    report << "CPU session: PASS\n";
 
 
-    MNN::Tensor* encoderInput =
+    MNN::Tensor* hiddenStates =
+            interpreter->getSessionInput(
+                    session,
+                    "hidden_states");
+
+    MNN::Tensor* timestep =
+            interpreter->getSessionInput(
+                    session,
+                    "timestep");
+
+    MNN::Tensor* encoderHiddenStates =
             interpreter->getSessionInput(
                     session,
                     "encoder_hidden_states");
 
 
-    MNN::Tensor* hiddenInput =
-            interpreter->getSessionInput(
-                    session,
-                    "hidden_states");
+    if (hiddenStates == nullptr ||
+        timestep == nullptr ||
+        encoderHiddenStates == nullptr) {
 
+        report << "Required transformer inputs: FAIL\n";
 
-    MNN::Tensor* timestepInput =
-            interpreter->getSessionInput(
-                    session,
-                    "timestep");
-
-
-    if (encoderInput == nullptr ||
-        hiddenInput == nullptr ||
-        timestepInput == nullptr) {
-
-        report
-                << "FAIL: Required Transformer inputs missing.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
+        interpreter->releaseSession(session);
+        delete interpreter;
 
         return report.str();
     }
 
 
-    report
-            << "encoder_hidden_states: "
-            << formatShape(encoderInput)
-            << "\n";
+    report << "Transformer inputs: PASS\n";
 
 
-    report
-            << "hidden_states: "
-            << formatShape(hiddenInput)
-            << "\n";
+    // --------------------------------------------------------
+    // Hidden states
+    // --------------------------------------------------------
 
+    std::vector<int> hiddenShape =
+            hiddenStates->shape();
 
-    report
-            << "timestep: "
-            << formatShape(timestepInput)
-            << "\n\n";
-
-
-    MNN::Tensor encoderHost(
-            encoderInput,
-            MNN::Tensor::CAFFE,
-            true);
+    report << "hidden_states shape: "
+           << formatShape(hiddenShape)
+           << "\n";
 
 
     MNN::Tensor hiddenHost(
-            hiddenInput,
-            MNN::Tensor::CAFFE,
-            true);
+            hiddenStates,
+            MNN::Tensor::CAFFE);
 
-
-    MNN::Tensor timestepHost(
-            timestepInput,
-            MNN::Tensor::CAFFE,
-            true);
-
-
-    float* encoderData =
-            encoderHost.host<float>();
-
-
-    float* hiddenData =
+    float* hiddenPtr =
             hiddenHost.host<float>();
 
+    if (hiddenPtr == nullptr) {
 
-    float* timestepData =
+        report << "hidden_states host tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+    std::fill(
+            hiddenPtr,
+            hiddenPtr + hiddenHost.elementSize(),
+            0.0f);
+
+    hiddenStates->copyFromHostTensor(&hiddenHost);
+
+
+    // --------------------------------------------------------
+    // Timestep
+    // --------------------------------------------------------
+
+    MNN::Tensor timestepHost(
+            timestep,
+            MNN::Tensor::CAFFE);
+
+    float* timestepPtr =
             timestepHost.host<float>();
 
+    if (timestepPtr == nullptr) {
 
-    if (encoderData == nullptr ||
-        hiddenData == nullptr ||
-        timestepData == nullptr) {
+        report << "timestep host tensor: FAIL\n";
 
-        report
-                << "FAIL: Transformer host tensor allocation failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
+        interpreter->releaseSession(session);
+        delete interpreter;
 
         return report.str();
     }
-
 
     std::fill(
-            encoderData,
-            encoderData +
-            encoderHost.elementSize(),
+            timestepPtr,
+            timestepPtr + timestepHost.elementSize(),
             0.0f);
 
+    timestep->copyFromHostTensor(&timestepHost);
+
+
+    // --------------------------------------------------------
+    // Encoder hidden states
+    // --------------------------------------------------------
+
+    MNN::Tensor encoderHost(
+            encoderHiddenStates,
+            MNN::Tensor::CAFFE);
+
+    float* encoderPtr =
+            encoderHost.host<float>();
+
+    if (encoderPtr == nullptr) {
+
+        report << "encoder_hidden_states host tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
 
     std::fill(
-            hiddenData,
-            hiddenData +
-            hiddenHost.elementSize(),
+            encoderPtr,
+            encoderPtr + encoderHost.elementSize(),
             0.0f);
 
-
-    std::fill(
-            timestepData,
-            timestepData +
-            timestepHost.elementSize(),
-            0.0f);
+    encoderHiddenStates->copyFromHostTensor(
+            &encoderHost);
 
 
-    if (!encoderInput->copyFromHostTensor(
-                &encoderHost)) {
-
-        report
-                << "FAIL: Encoder copy failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
+    report << "Input tensors: PASS\n";
 
 
-    if (!hiddenInput->copyFromHostTensor(
-                &hiddenHost)) {
-
-        report
-                << "FAIL: Hidden-state copy failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    if (!timestepInput->copyFromHostTensor(
-                &timestepHost)) {
-
-        report
-                << "FAIL: Timestep copy failed.\n";
-
-        destroyInterpreter(
-                interpreter,
-                session);
-
-        return report.str();
-    }
-
-
-    report
-            << "Inputs: PASS\n\n";
-
-
-    report
-            << "Running Transformer...\n";
-
-
-    auto start =
+    auto inferenceStart =
             std::chrono::steady_clock::now();
-
 
     MNN::ErrorCode result =
-            interpreter->runSession(
-                    session);
+            interpreter->runSession(session);
 
-
-    auto end =
+    auto inferenceEnd =
             std::chrono::steady_clock::now();
 
-
-    double elapsed =
-            std::chrono::duration<
-                    double,
-                    std::milli>(
-                            end - start)
-            .count();
+    double inferenceMs =
+            std::chrono::duration<double, std::milli>(
+                    inferenceEnd - inferenceStart).count();
 
 
-    report
-            << "Time: "
-            << elapsed
-            << " ms\n";
+    report << "Running transformer inference...\n";
 
+    report << "Inference time: "
+           << inferenceMs
+           << " ms\n";
 
-    report
-            << "Error code: "
-            << static_cast<int>(
-                    result)
-            << "\n\n";
+    report << "MNN error code: "
+           << static_cast<int>(result)
+           << "\n";
 
 
     if (result != MNN::NO_ERROR) {
 
-        report
-                << "FAIL: Transformer inference failed.\n";
+        report << "Inference: FAIL\n";
 
-        destroyInterpreter(
-                interpreter,
-                session);
+        interpreter->releaseSession(session);
+        delete interpreter;
 
         return report.str();
     }
+
+    report << "Inference: PASS\n";
 
 
     MNN::Tensor* output =
@@ -1413,74 +451,1037 @@ std::string runTransformerDiagnostic(
 
     if (output == nullptr) {
 
-        report
-                << "FAIL: Transformer output missing.\n";
+        report << "Output tensor: FAIL\n";
 
-        destroyInterpreter(
-                interpreter,
-                session);
+        interpreter->releaseSession(session);
+        delete interpreter;
 
         return report.str();
     }
 
 
-    report
-            << "Output shape: "
-            << formatShape(output)
-            << "\n";
+    report << "Output shape: "
+           << formatShape(output->shape())
+           << "\n";
 
 
-    report
-            << "Output elements: "
-            << output->elementSize()
-            << "\n\n";
+    MNN::Tensor outputHost(
+            output,
+            MNN::Tensor::CAFFE);
+
+    output->copyToHostTensor(&outputHost);
+
+    float* outputPtr =
+            outputHost.host<float>();
 
 
-    report
-            << "PASS: Transformer executed successfully.\n";
+    if (outputPtr != nullptr &&
+        outputHost.elementSize() > 0) {
+
+        report << "Output[0]: "
+               << outputPtr[0]
+               << "\n";
+
+        bool finite = true;
+
+        for (size_t i = 0;
+             i < outputHost.elementSize();
+             ++i) {
+
+            if (!isFiniteFloat(outputPtr[i])) {
+                finite = false;
+                break;
+            }
+        }
+
+        report << "Output finite: "
+               << (finite ? "YES" : "NO")
+               << "\n";
+    }
 
 
-    destroyInterpreter(
-            interpreter,
-            session);
+    interpreter->releaseSession(session);
+    delete interpreter;
+
+
+    report << "============================================\n";
+    report << "SANA TRANSFORMER CPU TEST: PASS\n";
+    report << "============================================\n";
 
 
     return report.str();
 }
 
 
+// ------------------------------------------------------------
+// VAE CPU diagnostic
+//
+// IMPORTANT:
+// This version deliberately uses an ALL-ZERO latent.
+// No random/sequential latent values are used.
+// ------------------------------------------------------------
+
+std::string runVaeCpuTest(
+        const std::string& vaePath) {
+
+    std::ostringstream report;
+
+
+    report << "============================================\n";
+    report << "SANA VAE FP16 CPU TEST\n";
+    report << "============================================\n";
+
+
+    report << "Model:\n";
+    report << vaePath\n";
+    report << "\n";
+
+
+    long long fileSize =
+            getFileSize(vaePath);
+
+
+    if (fileSize <= 0) {
+
+        report << "File: FAIL\n";
+        report << "File does not exist or is empty.\n";
+
+        return report.str();
+    }
+
+
+    report << "File size: "
+           << fileSize
+           << " bytes\n\n";
+
+
+    // --------------------------------------------------------
+    // Interpreter
+    // --------------------------------------------------------
+
+    auto createStart =
+            std::chrono::steady_clock::now();
+
+
+    report << "Creating MNN interpreter...\n";
+
+
+    MNN::Interpreter* interpreter =
+            MNN::Interpreter::createFromFile(
+                    vaePath.c_str());
+
+
+    auto createEnd =
+            std::chrono::steady_clock::now();
+
+
+    double createMs =
+            std::chrono::duration<double, std::milli>(
+                    createEnd - createStart).count();
+
+
+    report << "Interpreter creation time: "
+           << createMs
+           << " ms\n";
+
+
+    if (interpreter == nullptr) {
+
+        report << "Interpreter: FAIL\n";
+
+        return report.str();
+    }
+
+
+    report << "Interpreter: PASS\n";
+
+
+    // --------------------------------------------------------
+    // CPU session
+    // --------------------------------------------------------
+
+    report << "Creating CPU session...\n";
+
+
+    auto sessionStart =
+            std::chrono::steady_clock::now();
+
+
+    MNN::Session* session =
+            createCpuSession(
+                    interpreter,
+                    4);
+
+
+    auto sessionEnd =
+            std::chrono::steady_clock::now();
+
+
+    double sessionMs =
+            std::chrono::duration<double, std::milli>(
+                    sessionEnd - sessionStart).count();
+
+
+    report << "Session creation time: "
+           << sessionMs
+           << " ms\n";
+
+
+    if (session == nullptr) {
+
+        report << "CPU session: FAIL\n";
+
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "CPU session: PASS\n";
+
+
+    // --------------------------------------------------------
+    // Input
+    // --------------------------------------------------------
+
+    MNN::Tensor* input =
+            interpreter->getSessionInput(
+                    session,
+                    "latent");
+
+
+    if (input == nullptr) {
+
+        report << "Input tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    std::vector<int> inputShape =
+            input->shape();
+
+
+    report << "Input shape: "
+           << formatShape(inputShape)
+           << "\n";
+
+
+    size_t inputElements =
+            input->elementSize();
+
+
+    report << "Input elements: "
+           << inputElements
+           << "\n";
+
+
+    report << "Input type bytes: "
+           << input->getType().bytes()
+           << "\n";
+
+
+    report << "Input format: CAFFE / NCHW\n";
+
+
+    // --------------------------------------------------------
+    // Verify expected Sana VAE latent shape
+    // --------------------------------------------------------
+
+    bool correctShape =
+            inputShape.size() == 4 &&
+            inputShape[0] == 1 &&
+            inputShape[1] == 32 &&
+            inputShape[2] == 16 &&
+            inputShape[3] == 16;
+
+
+    if (!correctShape) {
+
+        report << "Input shape: FAIL\n";
+        report << "Expected [1, 32, 16, 16]\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "Input shape: PASS\n";
+
+
+    // --------------------------------------------------------
+    // Create host tensor
+    // --------------------------------------------------------
+
+    report << "Creating host tensor...\n";
+
+
+    MNN::Tensor hostTensor(
+            input,
+            MNN::Tensor::CAFFE);
+
+
+    float* hostPtr =
+            hostTensor.host<float>();
+
+
+    if (hostPtr == nullptr) {
+
+        report << "Host tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "Host tensor: PASS\n";
+
+
+    // --------------------------------------------------------
+    // IMPORTANT:
+    //
+    // ZERO LATENT TEST
+    //
+    // Every single latent value is exactly 0.0f.
+    // --------------------------------------------------------
+
+    std::fill(
+            hostPtr,
+            hostPtr + hostTensor.elementSize(),
+            0.0f);
+
+
+    report << "ZERO LATENT TEST\n";
+    report << "All latent values set to exactly 0.0\n";
+
+
+    report << "Latent sample: "
+           << hostPtr[0]
+           << ", "
+           << hostPtr[1]
+           << ", "
+           << hostPtr[2]
+           << "\n";
+
+
+    report << "Latent zero verification: ";
+
+    bool allZero = true;
+
+    for (size_t i = 0;
+         i < hostTensor.elementSize();
+         ++i) {
+
+        if (hostPtr[i] != 0.0f) {
+            allZero = false;
+            break;
+        }
+    }
+
+
+    report << (allZero ? "PASS" : "FAIL")
+           << "\n";
+
+
+    if (!allZero) {
+
+        report << "Zero latent preparation failed.\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    // --------------------------------------------------------
+    // Copy to MNN
+    // --------------------------------------------------------
+
+    report << "Copying ZERO latent to MNN...\n";
+
+
+    input->copyFromHostTensor(
+            &hostTensor);
+
+
+    report << "Host -> MNN: PASS\n";
+
+
+    // --------------------------------------------------------
+    // Run VAE
+    // --------------------------------------------------------
+
+    report << "Running VAE inference...\n";
+
+
+    auto inferenceStart =
+            std::chrono::steady_clock::now();
+
+
+    MNN::ErrorCode result =
+            interpreter->runSession(session);
+
+
+    auto inferenceEnd =
+            std::chrono::steady_clock::now();
+
+
+    double inferenceMs =
+            std::chrono::duration<double, std::milli>(
+                    inferenceEnd - inferenceStart).count();
+
+
+    report << "Inference time: "
+           << inferenceMs
+           << " ms\n";
+
+
+    report << "MNN error code: "
+           << static_cast<int>(result)
+           << "\n";
+
+
+    if (result != MNN::NO_ERROR) {
+
+        report << "Inference: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "Inference: PASS\n";
+
+
+    // --------------------------------------------------------
+    // Output
+    // --------------------------------------------------------
+
+    MNN::Tensor* output =
+            interpreter->getSessionOutput(
+                    session,
+                    nullptr);
+
+
+    if (output == nullptr) {
+
+        report << "Output tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    std::vector<int> outputShape =
+            output->shape();
+
+
+    report << "Output shape: "
+           << formatShape(outputShape)
+           << "\n";
+
+
+    size_t outputElements =
+            output->elementSize();
+
+
+    report << "Output elements: "
+           << outputElements
+           << "\n";
+
+
+    bool correctOutputShape =
+            outputShape.size() == 4 &&
+            outputShape[0] == 1 &&
+            outputShape[1] == 3 &&
+            outputShape[2] == 512 &&
+            outputShape[3] == 512;
+
+
+    if (!correctOutputShape) {
+
+        report << "Output shape: FAIL\n";
+        report << "Expected [1, 3, 512, 512]\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "Output shape: PASS\n";
+
+
+    // --------------------------------------------------------
+    // Copy output to host
+    // --------------------------------------------------------
+
+    MNN::Tensor outputHost(
+            output,
+            MNN::Tensor::CAFFE);
+
+
+    output->copyToHostTensor(
+            &outputHost);
+
+
+    float* outputPtr =
+            outputHost.host<float>();
+
+
+    if (outputPtr == nullptr) {
+
+        report << "Output host tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    // --------------------------------------------------------
+    // Check output values
+    // --------------------------------------------------------
+
+    float minimum =
+            std::numeric_limits<float>::infinity();
+
+    float maximum =
+            -std::numeric_limits<float>::infinity();
+
+    bool finite =
+            true;
+
+
+    for (size_t i = 0;
+         i < outputHost.elementSize();
+         ++i) {
+
+        float value =
+                outputPtr[i];
+
+
+        if (!std::isfinite(value)) {
+
+            finite = false;
+
+            break;
+        }
+
+
+        minimum =
+                std::min(
+                        minimum,
+                        value);
+
+
+        maximum =
+                std::max(
+                        maximum,
+                        value);
+    }
+
+
+    report << "Output[0]: "
+           << outputPtr[0]
+           << "\n";
+
+
+    if (finite) {
+
+        report << "Output min: "
+               << minimum
+               << "\n";
+
+
+        report << "Output max: "
+               << maximum
+               << "\n";
+
+
+        report << "Output finite: YES\n";
+
+    } else {
+
+        report << "Output min: nan\n";
+        report << "Output max: nan\n";
+        report << "Output finite: NO\n";
+    }
+
+
+    // --------------------------------------------------------
+    // Final diagnostic result
+    // --------------------------------------------------------
+
+    interpreter->releaseSession(session);
+    delete interpreter;
+
+
+    report << "============================================\n";
+
+
+    if (finite) {
+
+        report << "ZERO LATENT VAE TEST: PASS\n";
+
+    } else {
+
+        report << "ZERO LATENT VAE TEST: FAILED NUMERIC OUTPUT\n";
+    }
+
+
+    report << "============================================\n";
+
+
+    return report.str();
+}
+
+
+// ------------------------------------------------------------
+// VAE OpenCL diagnostic
+// ------------------------------------------------------------
+
+std::string runVaeOpenClTest(
+        const std::string& vaePath) {
+
+    std::ostringstream report;
+
+
+    report << "============================================\n";
+    report << "SANA VAE OPENCL TEST\n";
+    report << "============================================\n";
+
+
+    report << "Model:\n";
+    report << vaePath
+           << "\n";
+
+
+    long long fileSize =
+            getFileSize(vaePath);
+
+
+    if (fileSize <= 0) {
+
+        report << "File: FAIL\n";
+
+        return report.str();
+    }
+
+
+    report << "File size: "
+           << fileSize
+           << " bytes\n";
+
+
+    report << "Creating MNN interpreter...\n";
+
+
+    MNN::Interpreter* interpreter =
+            MNN::Interpreter::createFromFile(
+                    vaePath.c_str());
+
+
+    if (interpreter == nullptr) {
+
+        report << "Interpreter: FAIL\n";
+
+        return report.str();
+    }
+
+
+    report << "Interpreter: PASS\n";
+
+
+    report << "Creating OpenCL session...\n";
+
+
+    MNN::Session* session =
+            createOpenClSession(
+                    interpreter);
+
+
+    if (session == nullptr) {
+
+        report << "OpenCL session: FAIL\n";
+
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "OpenCL session: PASS\n";
+
+
+    MNN::Tensor* input =
+            interpreter->getSessionInput(
+                    session,
+                    "latent");
+
+
+    if (input == nullptr) {
+
+        report << "Input tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    std::vector<int> inputShape =
+            input->shape();
+
+
+    report << "Input shape: "
+           << formatShape(inputShape)
+           << "\n";
+
+
+    bool correctShape =
+            inputShape.size() == 4 &&
+            inputShape[0] == 1 &&
+            inputShape[1] == 32 &&
+            inputShape[2] == 16 &&
+            inputShape[3] == 16;
+
+
+    if (!correctShape) {
+
+        report << "Input shape: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "Input shape: PASS\n";
+
+
+    // --------------------------------------------------------
+    // ZERO LATENT
+    // --------------------------------------------------------
+
+    MNN::Tensor hostTensor(
+            input,
+            MNN::Tensor::CAFFE);
+
+
+    float* hostPtr =
+            hostTensor.host<float>();
+
+
+    if (hostPtr == nullptr) {
+
+        report << "Host tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    std::fill(
+            hostPtr,
+            hostPtr + hostTensor.elementSize(),
+            0.0f);
+
+
+    report << "ZERO LATENT TEST\n";
+    report << "All latent values set to exactly 0.0\n";
+
+
+    report << "Latent sample: "
+           << hostPtr[0]
+           << ", "
+           << hostPtr[1]
+           << ", "
+           << hostPtr[2]
+           << "\n";
+
+
+    input->copyFromHostTensor(
+            &hostTensor);
+
+
+    report << "Host -> MNN: PASS\n";
+
+
+    report << "Running VAE inference...\n";
+
+
+    auto inferenceStart =
+            std::chrono::steady_clock::now();
+
+
+    MNN::ErrorCode result =
+            interpreter->runSession(session);
+
+
+    auto inferenceEnd =
+            std::chrono::steady_clock::now();
+
+
+    double inferenceMs =
+            std::chrono::duration<double, std::milli>(
+                    inferenceEnd - inferenceStart).count();
+
+
+    report << "Inference time: "
+           << inferenceMs
+           << " ms\n";
+
+
+    report << "MNN error code: "
+           << static_cast<int>(result)
+           << "\n";
+
+
+    if (result != MNN::NO_ERROR) {
+
+        report << "Inference: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "Inference: PASS\n";
+
+
+    MNN::Tensor* output =
+            interpreter->getSessionOutput(
+                    session,
+                    nullptr);
+
+
+    if (output == nullptr) {
+
+        report << "Output tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    std::vector<int> outputShape =
+            output->shape();
+
+
+    report << "Output shape: "
+           << formatShape(outputShape)
+           << "\n";
+
+
+    bool correctOutputShape =
+            outputShape.size() == 4 &&
+            outputShape[0] == 1 &&
+            outputShape[1] == 3 &&
+            outputShape[2] == 512 &&
+            outputShape[3] == 512;
+
+
+    if (!correctOutputShape) {
+
+        report << "Output shape: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    report << "Output shape: PASS\n";
+
+
+    MNN::Tensor outputHost(
+            output,
+            MNN::Tensor::CAFFE);
+
+
+    output->copyToHostTensor(
+            &outputHost);
+
+
+    float* outputPtr =
+            outputHost.host<float>();
+
+
+    if (outputPtr == nullptr) {
+
+        report << "Output host tensor: FAIL\n";
+
+        interpreter->releaseSession(session);
+        delete interpreter;
+
+        return report.str();
+    }
+
+
+    float minimum =
+            std::numeric_limits<float>::infinity();
+
+    float maximum =
+            -std::numeric_limits<float>::infinity();
+
+    bool finite =
+            true;
+
+
+    for (size_t i = 0;
+         i < outputHost.elementSize();
+         ++i) {
+
+        float value =
+                outputPtr[i];
+
+
+        if (!std::isfinite(value)) {
+
+            finite = false;
+            break;
+        }
+
+
+        minimum =
+                std::min(
+                        minimum,
+                        value);
+
+
+        maximum =
+                std::max(
+                        maximum,
+                        value);
+    }
+
+
+    report << "Output[0]: "
+           << outputPtr[0]
+           << "\n";
+
+
+    if (finite) {
+
+        report << "Output min: "
+               << minimum
+               << "\n";
+
+
+        report << "Output max: "
+               << maximum
+               << "\n";
+
+
+        report << "Output finite: YES\n";
+
+    } else {
+
+        report << "Output min: nan\n";
+        report << "Output max: nan\n";
+        report << "Output finite: NO\n";
+    }
+
+
+    interpreter->releaseSession(session);
+    delete interpreter;
+
+
+    report << "============================================\n";
+
+
+    if (finite) {
+
+        report << "ZERO LATENT VAE OPENCL TEST: PASS\n";
+
+    } else {
+
+        report << "ZERO LATENT VAE OPENCL TEST: FAILED NUMERIC OUTPUT\n";
+    }
+
+
+    report << "============================================\n";
+
+
+    return report.str();
+}
+
+} // namespace
+
+
 // ============================================================
-// JNI INITIALIZE
+// JNI
 // ============================================================
 
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_sana_android_engine_NativeSana_nativeInitialize(
         JNIEnv* env,
-        jobject,
+        jobject /* thiz */,
         jobject assetManager,
         jstring modelAsset,
         jstring cachePath,
-        jboolean preferOpenCl,
+        jboolean /* preferOpenCl */,
         jint cpuThreads) {
 
-    std::lock_guard<std::mutex> lock(
-            gMutex);
+    std::lock_guard<std::mutex> lock(gMutex);
 
 
-    // --------------------------------------------------------
-    // IMPORTANT:
-    // Always release any previous model first.
-    // --------------------------------------------------------
-
-    releaseGlobalLocked();
+    releaseGlobalSession();
 
 
     if (assetManager == nullptr ||
-        modelAsset == nullptr) {
+        modelAsset == nullptr ||
+        cachePath == nullptr) {
 
         gStatus =
                 "Invalid initialization arguments";
+
+        return JNI_FALSE;
+    }
+
+
+    std::string assetName =
+            jstringToString(
+                    env,
+                    modelAsset);
+
+
+    std::string cacheDirectory =
+            jstringToString(
+                    env,
+                    cachePath);
+
+
+    if (assetName.empty() ||
+        cacheDirectory.empty()) {
+
+        gStatus =
+                "Invalid model asset or cache path";
 
         return JNI_FALSE;
     }
@@ -1495,37 +1496,11 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
     if (manager == nullptr) {
 
         gStatus =
-                "Could not access AssetManager";
+                "Unable to access AssetManager";
 
         return JNI_FALSE;
     }
 
-
-    std::string assetName =
-            jstringToString(
-                    env,
-                    modelAsset);
-
-
-    std::string cache =
-            jstringToString(
-                    env,
-                    cachePath);
-
-
-    if (assetName.empty() ||
-        cache.empty()) {
-
-        gStatus =
-                "Invalid model asset or cache path";
-
-        return JNI_FALSE;
-    }
-
-
-    // --------------------------------------------------------
-    // COPY MODEL ASSET TO CACHE
-    // --------------------------------------------------------
 
     AAsset* asset =
             AAssetManager_open(
@@ -1537,119 +1512,100 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
     if (asset == nullptr) {
 
         gStatus =
-                "Model asset not found";
+                "Unable to open model asset: "
+                + assetName;
 
         return JNI_FALSE;
     }
 
 
-    std::string modelPath =
-            cache +
+    std::string destination =
+            cacheDirectory +
             "/sana_model.mnn";
 
 
-    std::ofstream output(
-            modelPath,
-            std::ios::binary);
+    FILE* outputFile =
+            fopen(
+                    destination.c_str(),
+                    "wb");
 
 
-    if (!output.good()) {
+    if (outputFile == nullptr) {
 
         AAsset_close(asset);
 
         gStatus =
-                "Could not create cached model";
+                "Unable to create cached model";
 
         return JNI_FALSE;
     }
 
 
-    char buffer[64 * 1024];
-
-    int count;
+    char buffer[1024 * 1024];
 
 
-    while (
-            (count =
-                AAsset_read(
-                        asset,
-                        buffer,
-                        sizeof(buffer)))
-            > 0) {
+    int bytesRead = 0;
 
-        output.write(
+
+    while ((bytesRead =
+            AAsset_read(
+                    asset,
+                    buffer,
+                    sizeof(buffer))) > 0) {
+
+        fwrite(
                 buffer,
-                count);
+                1,
+                bytesRead,
+                outputFile);
     }
 
 
-    output.close();
-
+    fclose(outputFile);
     AAsset_close(asset);
 
 
-    // --------------------------------------------------------
-    // INTERPRETER
-    // --------------------------------------------------------
-
     gStatus =
-            "Creating Sana interpreter";
+            "Creating Sana CPU interpreter";
 
 
     gInterpreter =
             MNN::Interpreter::createFromFile(
-                    modelPath.c_str());
+                    destination.c_str());
 
 
     if (gInterpreter == nullptr) {
 
         gStatus =
-                "Could not create MNN interpreter";
+                "Failed to create Sana interpreter";
+
+        releaseGlobalSession();
 
         return JNI_FALSE;
     }
 
 
-    // --------------------------------------------------------
-    // IMPORTANT:
-    // Do NOT force OpenCL during startup.
-    //
-    // The model initializer now uses CPU.
-    // OpenCL can be tested separately.
-    // --------------------------------------------------------
-
-    gStatus =
-            "Creating Sana CPU session";
-
-
     int threads =
-            static_cast<int>(
-                    cpuThreads);
-
-
-    threads =
             std::max(
                     1,
                     std::min(
-                            threads,
-                            8));
+                            8,
+                            static_cast<int>(
+                                    cpuThreads)));
 
 
     gSession =
-            createSession(
+            createCpuSession(
                     gInterpreter,
-                    false,
                     threads);
 
 
     if (gSession == nullptr) {
 
-        delete gInterpreter;
-
-        gInterpreter = nullptr;
-
         gStatus =
-                "Could not create Sana CPU session";
+                "Failed to create Sana CPU session";
+
+        releaseGlobalSession();
 
         return JNI_FALSE;
     }
@@ -1657,19 +1613,10 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
 
     gInitialized = true;
 
-    gBackend =
-            "CPU";
-
+    gBackend = "CPU";
 
     gStatus =
-            "Sana model initialized";
-
-
-    LOGI(
-            "Sana initialized using CPU backend");
-
-
-    (void)preferOpenCl;
+            "Sana initialized successfully on CPU";
 
 
     return JNI_TRUE;
@@ -1677,46 +1624,45 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
 
 
 // ============================================================
-// JNI STATE
-// ============================================================
 
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
-        JNIEnv*,
-        jobject) {
+        JNIEnv* /* env */,
+        jobject /* thiz */) {
 
-    std::lock_guard<std::mutex> lock(
-            gMutex);
+    std::lock_guard<std::mutex> lock(gMutex);
 
     return gInitialized
-            ? JNI_TRUE
-            : JNI_FALSE;
+           ? JNI_TRUE
+           : JNI_FALSE;
 }
 
+
+// ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeGetBackend(
         JNIEnv* env,
-        jobject) {
+        jobject /* thiz */) {
 
-    std::lock_guard<std::mutex> lock(
-            gMutex);
+    std::lock_guard<std::mutex> lock(gMutex);
 
     return env->NewStringUTF(
             gBackend.c_str());
 }
 
 
+// ============================================================
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeGetStatus(
         JNIEnv* env,
-        jobject) {
+        jobject /* thiz */) {
 
-    std::lock_guard<std::mutex> lock(
-            gMutex);
+    std::lock_guard<std::mutex> lock(gMutex);
 
     return env->NewStringUTF(
             gStatus.c_str());
@@ -1724,52 +1670,50 @@ Java_com_sana_android_engine_NativeSana_nativeGetStatus(
 
 
 // ============================================================
-// JNI RELEASE
-// ============================================================
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_sana_android_engine_NativeSana_nativeRelease(
-        JNIEnv*,
-        jobject) {
+        JNIEnv* /* env */,
+        jobject /* thiz */) {
 
-    std::lock_guard<std::mutex> lock(
-            gMutex);
+    std::lock_guard<std::mutex> lock(gMutex);
 
-    releaseGlobalLocked();
+    releaseGlobalSession();
+
+    gBackend = "NONE";
+
+    gStatus = "Released";
 }
 
 
-// ============================================================
-// JNI TRANSFORMER TEST
 // ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
         JNIEnv* env,
-        jobject,
+        jobject /* thiz */,
         jstring transformerPath,
         jstring cachePath,
-        jboolean preferOpenCl) {
+        jboolean /* preferOpenCl */) {
 
-    std::string transformer =
+    std::string path =
             jstringToString(
                     env,
                     transformerPath);
-
 
     std::string cache =
             jstringToString(
                     env,
                     cachePath);
 
+    (void)cache;
+
 
     std::string result =
-            runTransformerDiagnostic(
-                    transformer,
-                    cache,
-                    preferOpenCl);
+            runTransformerCpuTest(
+                    path);
 
 
     return env->NewStringUTF(
@@ -1777,39 +1721,40 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformer(
 }
 
 
-// ============================================================
-// JNI VAE TEST
-//
-// IMPORTANT:
-// This function now tests CPU first only.
-//
-// It does NOT automatically run OpenCL.
-// This prevents the APK from getting stuck because of
-// OpenCL/FP16 session initialization.
 // ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeTestVae(
         JNIEnv* env,
-        jobject,
+        jobject /* thiz */,
         jstring vaePath,
         jstring cachePath,
-        jboolean preferOpenCl) {
+        jboolean /* preferOpenCl */) {
 
-    (void)cachePath;
-    (void)preferOpenCl;
-
-
-    std::string vae =
+    std::string path =
             jstringToString(
                     env,
                     vaePath);
 
+    std::string cache =
+            jstringToString(
+                    env,
+                    cachePath);
+
+    (void)cache;
+
+
+    // --------------------------------------------------------
+    // IMPORTANT:
+    // VAE diagnostic intentionally uses CPU only.
+    //
+    // The latent is ALL ZERO.
+    // --------------------------------------------------------
 
     std::string result =
             runVaeCpuTest(
-                    vae);
+                    path);
 
 
     return env->NewStringUTF(
@@ -1818,63 +1763,57 @@ Java_com_sana_android_engine_NativeSana_nativeTestVae(
 
 
 // ============================================================
-// JNI BOTH MODELS
-//
-// Transformer + VAE CPU diagnostic.
-// ============================================================
 
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_sana_android_engine_NativeSana_nativeTestModels(
         JNIEnv* env,
-        jobject,
+        jobject /* thiz */,
         jstring transformerPath,
         jstring vaePath,
         jstring cachePath,
-        jboolean preferOpenCl) {
+        jboolean /* preferOpenCl */) {
 
     std::string transformer =
             jstringToString(
                     env,
                     transformerPath);
 
-
     std::string vae =
             jstringToString(
                     env,
                     vaePath);
-
 
     std::string cache =
             jstringToString(
                     env,
                     cachePath);
 
+    (void)cache;
+
 
     std::ostringstream report;
 
 
-    report
-            << "SANA MODEL DIAGNOSTIC\n"
-            << "=====================\n\n";
+    report << "============================================\n";
+    report << "SANA MODEL DIAGNOSTIC\n";
+    report << "============================================\n\n";
 
 
-    report
-            << runTransformerDiagnostic(
-                    transformer,
-                    cache,
-                    preferOpenCl)
-            << "\n";
+    report << runTransformerCpuTest(
+            transformer);
 
 
-    report
-            << runVaeCpuTest(
-                    vae)
-            << "\n";
+    report << "\n\n";
+
+
+    report << runVaeCpuTest(
+            vae);
+
+
+    report << "\n============================================\n";
 
 
     return env->NewStringUTF(
             report.str().c_str());
 }
-
-} // namespace
