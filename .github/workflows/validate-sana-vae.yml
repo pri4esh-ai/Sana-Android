@@ -1,4 +1,4 @@
-name: Validate Sana VAE Only
+aname: Validate Sana VAE Only
 
 on:
   workflow_dispatch:
@@ -1627,7 +1627,76 @@ jobs:
           ./test_mnn_vae \
             mnn_models/sana_vae_decoder_fp32.mnn
 
+      # ============================================================
+      # CREATE ANDROID PACKAGE
+      # ============================================================
 
+      - name: Create Android VAE package
+        run: |
+          mkdir -p android_package
+
+          cp mnn_models/sana_vae_decoder_fp32.mnn \
+             android_package/sana_vae_decoder.mnn
+
+          cp sana_model/vae/config.json \
+             android_package/config.json
+
+          cp sana_model/scheduler/scheduler_config.json \
+             android_package/scheduler_config.json
+
+          cat > android_package/README.txt <<'EOF'
+          Sana Android Model Package
+          ==========================
+
+          Model: Sana 0.6B / 512px
+          Runtime: Alibaba MNN
+
+          VAE: sana_vae_decoder.mnn
+
+          Input : 1 x 32 x 16 x 16
+          Output: 1 x 3 x 512 x 512
+
+          Verified:
+          - PyTorch PASS
+          - MNN FP32 PASS
+
+          Ready for Android integration.
+          EOF
+
+      # ============================================================
+      # CREATE ZIP
+      # ============================================================
+
+      - name: Zip Android package
+        run: |
+          cd android_package
+          zip -r ../sana_android_vae_fp32.zip .
+
+      # ============================================================
+      # VERIFY PACKAGE
+      # ============================================================
+
+      - name: Verify Android package
+        run: |
+          echo "============================================================"
+          echo "ANDROID PACKAGE CONTENTS"
+          echo "============================================================"
+
+          ls -lh android_package
+          ls -lh sana_android_vae_fp32.zip
+
+      # ============================================================
+      # UPLOAD ANDROID PACKAGE
+      # ============================================================
+
+      - name: Upload Android package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sana-android-vae-fp32
+          path: sana_android_vae_fp32.zip
+          if-no-files-found: error
+
+          
       # ============================================================
       # ARTIFACTS
       # ============================================================
