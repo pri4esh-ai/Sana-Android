@@ -48,7 +48,7 @@ class MainActivity : ComponentActivity() {
                 Surface(
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    SanaTransformerTestScreen(
+                    SanaVaeTestScreen(
                         context = this@MainActivity
                     )
                 }
@@ -67,15 +67,15 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun SanaTransformerTestScreen(
+private fun SanaVaeTestScreen(
     context: Context
 ) {
-    var transformerUri by remember {
+    var vaeUri by remember {
         mutableStateOf<Uri?>(null)
     }
 
-    var transformerName by remember {
-        mutableStateOf("No Transformer selected")
+    var vaeName by remember {
+        mutableStateOf("No VAE selected")
     }
 
     var status by remember {
@@ -108,21 +108,21 @@ private fun SanaTransformerTestScreen(
         }
     }
 
-    val transformerPicker =
+    val vaePicker =
         rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenDocument()
         ) { uri ->
 
             if (uri != null) {
 
-                transformerUri = uri
+                vaeUri = uri
 
-                transformerName =
+                vaeName =
                     uri.lastPathSegment
                         ?.substringAfterLast("/")
-                        ?: "Transformer selected"
+                        ?: "VAE selected"
 
-                status = "Transformer selected"
+                status = "VAE selected"
 
                 result = ""
             }
@@ -147,7 +147,7 @@ private fun SanaTransformerTestScreen(
         )
 
         Text(
-            text = "Sana 0.6B • 512×512 • Transformer Diagnostic",
+            text = "Sana 0.6B • 512×512 • VAE Diagnostic",
             style = MaterialTheme.typography.bodyMedium
         )
 
@@ -172,12 +172,39 @@ private fun SanaTransformerTestScreen(
             ) {
 
                 Text(
-                    text = "Transformer model",
+                    text = "Transformer status",
                     fontWeight = FontWeight.Bold
                 )
 
                 Text(
-                    text = transformerName,
+                    text = "✓ Transformer diagnostic passed"
+                )
+
+                Text(
+                    text = "The Transformer is excluded from this test.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+
+            Column(
+                modifier = Modifier.padding(16.dp),
+
+                verticalArrangement =
+                    Arrangement.spacedBy(8.dp)
+            ) {
+
+                Text(
+                    text = "VAE decoder model",
+                    fontWeight = FontWeight.Bold
+                )
+
+                Text(
+                    text = vaeName,
                     style = MaterialTheme.typography.bodySmall
                 )
 
@@ -188,7 +215,7 @@ private fun SanaTransformerTestScreen(
 
                     onClick = {
 
-                        transformerPicker.launch(
+                        vaePicker.launch(
                             arrayOf(
                                 "application/octet-stream",
                                 "application/*",
@@ -201,7 +228,7 @@ private fun SanaTransformerTestScreen(
                 ) {
 
                     Text(
-                        text = "SELECT TRANSFORMER"
+                        text = "SELECT VAE"
                     )
                 }
             }
@@ -209,14 +236,14 @@ private fun SanaTransformerTestScreen(
 
         Button(
             enabled =
-                transformerUri != null &&
+                vaeUri != null &&
                 !testing &&
                 !copying,
 
             onClick = {
 
                 val selectedUri =
-                    transformerUri
+                    vaeUri
                         ?: return@Button
 
                 testing = true
@@ -225,7 +252,7 @@ private fun SanaTransformerTestScreen(
                 result = ""
 
                 status =
-                    "Copying Transformer..."
+                    "Copying VAE..."
 
                 executor.execute {
 
@@ -247,25 +274,25 @@ private fun SanaTransformerTestScreen(
                             )
                         }
 
-                        val transformerFile =
+                        val vaeFile =
                             File(
                                 modelDirectory,
-                                "sana_transformer.mnn"
+                                "sana_vae_decoder.mnn"
                             )
 
                         copyUriToFile(
                             context = context,
                             uri = selectedUri,
-                            destination = transformerFile
+                            destination = vaeFile
                         )
 
                         val fileSize =
-                            transformerFile.length()
+                            vaeFile.length()
 
                         if (fileSize <= 0L) {
 
                             throw IllegalStateException(
-                                "Copied Transformer is empty"
+                                "Copied VAE is empty"
                             )
                         }
 
@@ -274,24 +301,23 @@ private fun SanaTransformerTestScreen(
                             copying = false
 
                             status =
-                                "Transformer copied. Starting native test..."
+                                "VAE copied. Starting native test..."
                         }
 
                         /*
                          * IMPORTANT:
                          *
-                         * This calls the NEW transformer-only JNI API.
+                         * This calls the VAE-only JNI API.
                          *
-                         * VAE is NOT passed.
-                         * VAE is NOT copied.
-                         * VAE is NOT loaded.
+                         * Transformer is NOT passed.
+                         * Transformer is NOT copied.
+                         * Transformer is NOT loaded.
                          */
 
                         val output =
-                            NativeSana.testTransformer(
+                            NativeSana.testVae(
                                 context = context,
-                                transformerFile =
-                                    transformerFile,
+                                vaeFile = vaeFile,
                                 preferOpenCl = true
                             )
 
@@ -300,7 +326,7 @@ private fun SanaTransformerTestScreen(
                             result = output
 
                             status =
-                                "Transformer test finished"
+                                "VAE test finished"
 
                             testing = false
                         }
@@ -356,14 +382,14 @@ private fun SanaTransformerTestScreen(
 
                 Text(
                     text =
-                        "Testing Transformer..."
+                        "Testing VAE..."
                 )
 
             } else {
 
                 Text(
                     text =
-                        "TEST TRANSFORMER"
+                        "TEST VAE"
                 )
             }
         }
@@ -432,17 +458,17 @@ private fun SanaTransformerTestScreen(
 
                 Text(
                     text =
-                        "Only sana_transformer.mnn is tested."
+                        "Only sana_vae_decoder.mnn is tested."
                 )
 
                 Text(
                     text =
-                        "The VAE is completely excluded from this test."
+                        "The Transformer is completely excluded from this test."
                 )
 
                 Text(
                     text =
-                        "After the Transformer passes, we will diagnose the VAE separately."
+                        "The VAE receives the 32-channel latent tensor produced by the Sana 0.6B architecture."
                 )
             }
         }
@@ -486,6 +512,6 @@ private fun copyUriToFile(
 
         }
         ?: throw IllegalStateException(
-            "Unable to open selected Transformer"
+            "Unable to open selected VAE"
         )
 }
