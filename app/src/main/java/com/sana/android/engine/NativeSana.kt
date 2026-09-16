@@ -28,13 +28,33 @@ object NativeSana {
     /**
      * Transformer-only diagnostic.
      *
-     * IMPORTANT:
-     * - Loads ONLY sana_transformer.mnn
-     * - Does NOT load the VAE
-     * - Does NOT create a second Transformer session
+     * Loads ONLY sana_transformer.mnn.
      */
     external fun nativeTestTransformer(
         transformerPath: String,
+        cachePath: String,
+        preferOpenCl: Boolean
+    ): String
+
+    /**
+     * VAE-only diagnostic.
+     *
+     * Loads ONLY sana_vae_decoder.mnn.
+     */
+    external fun nativeTestVae(
+        vaePath: String,
+        cachePath: String,
+        preferOpenCl: Boolean
+    ): String
+
+    /**
+     * Legacy combined test.
+     *
+     * Kept for compatibility with existing code.
+     */
+    external fun nativeTestModels(
+        transformerPath: String,
+        vaePath: String,
         cachePath: String,
         preferOpenCl: Boolean
     ): String
@@ -74,6 +94,32 @@ object NativeSana {
     ): String {
         return nativeTestTransformer(
             transformerPath = transformerFile.absolutePath,
+            cachePath = context.cacheDir.absolutePath,
+            preferOpenCl = preferOpenCl
+        )
+    }
+
+    fun testVae(
+        context: Context,
+        vaeFile: File,
+        preferOpenCl: Boolean = true
+    ): String {
+        return nativeTestVae(
+            vaePath = vaeFile.absolutePath,
+            cachePath = context.cacheDir.absolutePath,
+            preferOpenCl = preferOpenCl
+        )
+    }
+
+    fun testModels(
+        context: Context,
+        transformerFile: File,
+        vaeFile: File,
+        preferOpenCl: Boolean = true
+    ): String {
+        return nativeTestModels(
+            transformerPath = transformerFile.absolutePath,
+            vaePath = vaeFile.absolutePath,
             cachePath = context.cacheDir.absolutePath,
             preferOpenCl = preferOpenCl
         )
