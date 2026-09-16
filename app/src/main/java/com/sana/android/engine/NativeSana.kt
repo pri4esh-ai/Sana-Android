@@ -44,18 +44,13 @@ object NativeSana {
         )
     }
 
-    fun isInitialized(): Boolean =
-        nativeIsInitialized()
+    fun isInitialized() = nativeIsInitialized()
 
-    fun backend(): String =
-        nativeGetBackend()
+    fun backend() = nativeGetBackend()
 
-    fun status(): String =
-        nativeGetStatus()
+    fun status() = nativeGetStatus()
 
-    fun release() {
-        nativeRelease()
-    }
+    fun release() = nativeRelease()
 
     fun testModels(
         context: Context,
