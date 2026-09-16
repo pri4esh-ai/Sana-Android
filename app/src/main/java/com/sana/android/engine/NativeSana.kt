@@ -1,6 +1,7 @@
 package com.sana.android.engine
 
 import android.content.Context
+import android.content.res.AssetManager
 import java.io.File
 
 object NativeSana {
@@ -9,8 +10,9 @@ object NativeSana {
         System.loadLibrary("sana_native")
     }
 
+    // Existing engine API
     external fun nativeInitialize(
-        assetManager: android.content.res.AssetManager,
+        assetManager: AssetManager,
         modelAsset: String,
         cachePath: String,
         preferOpenCl: Boolean,
@@ -18,40 +20,25 @@ object NativeSana {
     ): Boolean
 
     external fun nativeIsInitialized(): Boolean
-
     external fun nativeGetBackend(): String
-
     external fun nativeGetStatus(): String
-
     external fun nativeRelease()
 
-    /**
-     * Transformer-only diagnostic.
-     *
-     * Loads ONLY sana_transformer.mnn.
-     */
+    // Transformer-only diagnostic
     external fun nativeTestTransformer(
         transformerPath: String,
         cachePath: String,
         preferOpenCl: Boolean
     ): String
 
-    /**
-     * VAE-only diagnostic.
-     *
-     * Loads ONLY sana_vae_decoder.mnn.
-     */
+    // VAE-only diagnostic
     external fun nativeTestVae(
         vaePath: String,
         cachePath: String,
         preferOpenCl: Boolean
     ): String
 
-    /**
-     * Legacy combined test.
-     *
-     * Kept for compatibility with existing code.
-     */
+    // Legacy combined test (kept for compatibility)
     external fun nativeTestModels(
         transformerPath: String,
         vaePath: String,
@@ -74,18 +61,13 @@ object NativeSana {
         )
     }
 
-    fun isInitialized(): Boolean =
-        nativeIsInitialized()
+    fun isInitialized(): Boolean = nativeIsInitialized()
 
-    fun backend(): String =
-        nativeGetBackend()
+    fun backend(): String = nativeGetBackend()
 
-    fun status(): String =
-        nativeGetStatus()
+    fun status(): String = nativeGetStatus()
 
-    fun release() {
-        nativeRelease()
-    }
+    fun release() = nativeRelease()
 
     fun testTransformer(
         context: Context,
