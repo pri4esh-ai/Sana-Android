@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <fcntl.h>
 #include <sstream>
 #include <string>
@@ -28,22 +30,17 @@ std::string gBackend = "CPU";
 
 std::string gStatus = "Not initialized";
 
-MNN::Interpreter* gInterpreter = nullptr;
-
-MNN::Session* gSession = nullptr;
-
 
 /*
- * ------------------------------------------------------------
+ * ============================================================
  * JNI STRING
- * ------------------------------------------------------------
+ * ============================================================
  */
 
 std::string jstringToString(
     JNIEnv* env,
     jstring value
 ) {
-
     if (!value) {
         return "";
     }
@@ -58,7 +55,6 @@ std::string jstringToString(
         chars ? chars : "";
 
     if (chars) {
-
         env->ReleaseStringUTFChars(
             value,
             chars
@@ -70,64 +66,14 @@ std::string jstringToString(
 
 
 /*
- * ------------------------------------------------------------
- * SHAPE
- * ------------------------------------------------------------
- */
-
-std::string formatShape(
-    const std::vector<int>& shape
-) {
-
-    std::ostringstream out;
-
-    out << "[";
-
-    for (size_t i = 0; i < shape.size(); ++i) {
-
-        if (i != 0) {
-            out << ", ";
-        }
-
-        out << shape[i];
-    }
-
-    out << "]";
-
-    return out.str();
-}
-
-
-/*
- * ------------------------------------------------------------
- * FD PATH
- * ------------------------------------------------------------
- */
-
-std::string fdPath(
-    int fd
-) {
-
-    std::ostringstream out;
-
-    out
-        << "/proc/self/fd/"
-        << fd;
-
-    return out.str();
-}
-
-
-/*
- * ------------------------------------------------------------
- * VALID FD
- * ------------------------------------------------------------
+ * ============================================================
+ * FD VALIDATION
+ * ============================================================
  */
 
 bool validFd(
     int fd
 ) {
-
     if (fd < 0) {
         return false;
     }
@@ -140,17 +86,26 @@ bool validFd(
 
 
 /*
- * ------------------------------------------------------------
+ * ============================================================
  * FILE SIZE
- * ------------------------------------------------------------
+ * ============================================================
  */
 
-long long fdFileSize(
+long long getFileSize(
     int fd
 ) {
-
     if (!validFd(fd)) {
         return -1;
+    }
+
+    struct stat st{};
+
+    if (fstat(fd, &st) == 0) {
+        if (st.st_size > 0) {
+            return static_cast<long long>(
+                st.st_size
+            );
+        }
     }
 
     off_t current =
@@ -188,16 +143,229 @@ long long fdFileSize(
 
 
 /*
- * ------------------------------------------------------------
+ * ============================================================
+ * READ EXACTLY
+ * ============================================================
+ */
+
+bool readFully(
+    int fd,
+    uint8_t* buffer,
+    size_t size
+) {
+    if (!validFd(fd)) {
+        return false;
+    }
+
+    /*
+     * Always start at the beginning.
+     */
+    if (lseek(fd, 0, SEEK_SET) == (off_t)-1) {
+        /*
+         * Some SAF descriptors may not support seek.
+         * In that case continue from the current position.
+         */
+    }
+
+    size_t total = 0;
+
+    while (total < size) {
+
+        ssize_t count =
+            read(
+                fd,
+                buffer + total,
+                size - total
+            );
+
+        if (count < 0) {
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            return false;
+        }
+
+        if (count == 0) {
+            break;
+        }
+
+        total +=
+            static_cast<size_t>(
+                count
+            );
+    }
+
+    return total == size;
+}
+
+
+/*
+ * ============================================================
+ * MNN BUFFER LOADER
+ *
+ * MNN officially supports createFromBuffer().
+ *
+ * The Android file itself remains external.
+ * We only create a temporary native buffer for MNN.
+ * ============================================================
+ */
+
+MNN::Interpreter* loadModelFromFd(
+    int fd,
+    std::vector<uint8_t>& modelBuffer,
+    std::string& error
+) {
+    if (!validFd(fd)) {
+
+        error =
+            "Invalid file descriptor";
+
+        return nullptr;
+    }
+
+    long long fileSize =
+        getFileSize(fd);
+
+    if (fileSize <= 0) {
+
+        error =
+            "Unable to determine model file size";
+
+        return nullptr;
+    }
+
+    /*
+     * Protect against impossible/overflowing sizes.
+     */
+    if (
+        static_cast<unsigned long long>(
+            fileSize
+        )
+        >
+        static_cast<unsigned long long>(
+            SIZE_MAX
+        )
+    ) {
+
+        error =
+            "Model file is too large for address space";
+
+        return nullptr;
+    }
+
+    size_t size =
+        static_cast<size_t>(
+            fileSize
+        );
+
+    /*
+     * Reserve the exact model size.
+     */
+    try {
+
+        modelBuffer.resize(
+            size
+        );
+
+    } catch (...) {
+
+        error =
+            "Native memory allocation failed for model buffer";
+
+        modelBuffer.clear();
+
+        return nullptr;
+    }
+
+    /*
+     * Read the complete MNN file.
+     */
+    if (!readFully(
+            fd,
+            modelBuffer.data(),
+            modelBuffer.size()
+        )) {
+
+        error =
+            "Unable to read complete model from file descriptor";
+
+        modelBuffer.clear();
+
+        return nullptr;
+    }
+
+    /*
+     * IMPORTANT:
+     *
+     * createFromBuffer() keeps/uses the supplied model buffer
+     * while the Interpreter is alive.
+     *
+     * Therefore modelBuffer MUST remain alive until the
+     * Interpreter has been destroyed.
+     */
+    MNN::Interpreter* interpreter =
+        MNN::Interpreter::createFromBuffer(
+            modelBuffer.data(),
+            modelBuffer.size()
+        );
+
+    if (!interpreter) {
+
+        error =
+            "MNN createFromBuffer() returned null";
+
+        modelBuffer.clear();
+
+        return nullptr;
+    }
+
+    return interpreter;
+}
+
+
+/*
+ * ============================================================
+ * SHAPE FORMAT
+ * ============================================================
+ */
+
+std::string formatShape(
+    const std::vector<int>& shape
+) {
+    std::ostringstream out;
+
+    out << "[";
+
+    for (
+        size_t i = 0;
+        i < shape.size();
+        ++i
+    ) {
+
+        if (i != 0) {
+            out << ", ";
+        }
+
+        out << shape[i];
+    }
+
+    out << "]";
+
+    return out.str();
+}
+
+
+/*
+ * ============================================================
  * CPU SESSION
- * ------------------------------------------------------------
+ * ============================================================
  */
 
 MNN::Session* createCpuSession(
-    MNN::Interpreter* interpreter,
-    int threads
+    MNN::Interpreter* interpreter
 ) {
-
     if (!interpreter) {
         return nullptr;
     }
@@ -208,7 +376,18 @@ MNN::Session* createCpuSession(
         MNN_FORWARD_CPU;
 
     config.numThread =
-        threads;
+        4;
+
+    /*
+     * High precision for diagnostic.
+     */
+    MNN::BackendConfig backendConfig;
+
+    backendConfig.precision =
+        MNN::BackendConfig::Precision_High;
+
+    config.backendConfig =
+        &backendConfig;
 
     return interpreter->createSession(
         config
@@ -217,31 +396,14 @@ MNN::Session* createCpuSession(
 
 
 /*
- * ------------------------------------------------------------
- * DESTROY
- * ------------------------------------------------------------
- */
-
-void destroyInterpreter(
-    MNN::Interpreter* interpreter
-) {
-
-    if (interpreter) {
-        delete interpreter;
-    }
-}
-
-
-/*
- * ------------------------------------------------------------
+ * ============================================================
  * TRANSFORMER TEST
- * ------------------------------------------------------------
+ * ============================================================
  */
 
 std::string runTransformerTest(
     int fd
 ) {
-
     std::ostringstream result;
 
     result
@@ -252,6 +414,7 @@ std::string runTransformerTest(
         << fd
         << "\n";
 
+
     if (!validFd(fd)) {
 
         result
@@ -260,15 +423,17 @@ std::string runTransformerTest(
         return result.str();
     }
 
-    long long size =
-        fdFileSize(fd);
+
+    long long fileSize =
+        getFileSize(fd);
 
     result
         << "File size: "
-        << size
+        << fileSize
         << " bytes\n\n";
 
-    if (size <= 0) {
+
+    if (fileSize <= 0) {
 
         result
             << "File size: FAIL\n";
@@ -276,55 +441,79 @@ std::string runTransformerTest(
         return result.str();
     }
 
-    std::string path =
-        fdPath(fd);
 
     result
-        << "Creating MNN interpreter...\n";
+        << "Loading model through MNN buffer API...\n";
+
+
+    std::vector<uint8_t> modelBuffer;
+
+    std::string loadError;
+
 
     MNN::Interpreter* interpreter =
-        MNN::Interpreter::createFromFile(
-            path.c_str()
+        loadModelFromFd(
+            fd,
+            modelBuffer,
+            loadError
         );
+
 
     if (!interpreter) {
 
         result
             << "Interpreter: FAIL\n";
 
+        result
+            << "Reason: "
+            << loadError
+            << "\n";
+
         return result.str();
     }
+
 
     result
         << "Interpreter: PASS\n";
 
+
+    result
+        << "Model loaded with createFromBuffer()\n";
+
+
     result
         << "Creating CPU session...\n";
 
+
     MNN::Session* session =
         createCpuSession(
-            interpreter,
-            4
+            interpreter
         );
+
 
     if (!session) {
 
         result
             << "CPU session: FAIL\n";
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
 
+        modelBuffer.clear();
+
         return result.str();
     }
+
 
     result
         << "CPU session: PASS\n\n";
 
 
     /*
-     * INPUTS
+     * ========================================================
+     * FIND INPUTS
+     * ========================================================
      */
 
     MNN::Tensor* hiddenStates =
@@ -346,50 +535,62 @@ std::string runTransformerTest(
         );
 
 
-    if (!hiddenStates) {
+    /*
+     * Some converted MNN models can have different names.
+     *
+     * If named lookup fails, inspect all inputs.
+     */
+    if (
+        !hiddenStates ||
+        !timestep ||
+        !encoderHiddenStates
+    ) {
 
         result
-            << "hidden_states: FAIL\n";
+            << "Named input lookup incomplete.\n";
+
+        result
+            << "Attempting all-input diagnostic...\n";
+
+
+        auto allInputs =
+            interpreter->getSessionInputAll(
+                session
+            );
+
+
+        result
+            << "Input count: "
+            << allInputs.size()
+            << "\n";
+
+
+        for (const auto& item : allInputs) {
+
+            result
+                << "Input: "
+                << item.first
+                << " shape="
+                << formatShape(
+                    item.second->shape()
+                )
+                << "\n";
+        }
+
+
+        result
+            << "\nTransformer input lookup: FAIL\n";
+
 
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
 
-        return result.str();
-    }
-
-    if (!timestep) {
-
-        result
-            << "timestep: FAIL\n";
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
-
-        return result.str();
-    }
-
-    if (!encoderHiddenStates) {
-
-        result
-            << "encoder_hidden_states: FAIL\n";
-
-        interpreter->releaseSession(
-            session
-        );
-
-        destroyInterpreter(
-            interpreter
-        );
+        modelBuffer.clear();
 
         return result.str();
     }
@@ -404,10 +605,6 @@ std::string runTransformerTest(
     result
         << "encoder_hidden_states: PASS\n\n";
 
-
-    /*
-     * SHAPES
-     */
 
     result
         << "hidden_states shape: "
@@ -432,7 +629,9 @@ std::string runTransformerTest(
 
 
     /*
+     * ========================================================
      * HOST TENSORS
+     * ========================================================
      */
 
     MNN::Tensor hostHidden(
@@ -461,27 +660,32 @@ std::string runTransformerTest(
         hostEncoder.host<float>();
 
 
-    if (!hiddenData ||
+    if (
+        !hiddenData ||
         !timestepData ||
-        !encoderData) {
+        !encoderData
+    ) {
 
         result
             << "Host tensor mapping: FAIL\n";
+
 
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
 
 
     /*
-     * ZERO INPUT
+     * Zero diagnostic input.
      */
 
     std::fill(
@@ -534,7 +738,9 @@ std::string runTransformerTest(
 
     result
         << "MNN error code: "
-        << static_cast<int>(code)
+        << static_cast<int>(
+            code
+        )
         << "\n";
 
 
@@ -543,13 +749,16 @@ std::string runTransformerTest(
         result
             << "Transformer inference: FAIL\n";
 
+
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
@@ -560,7 +769,9 @@ std::string runTransformerTest(
 
 
     /*
+     * ========================================================
      * OUTPUT
+     * ========================================================
      */
 
     MNN::Tensor* output =
@@ -613,19 +824,25 @@ std::string runTransformerTest(
             hostOutput.host<float>();
 
 
-        if (values &&
-            hostOutput.elementSize() > 0) {
+        if (
+            values &&
+            hostOutput.elementSize() > 0
+        ) {
 
-            size_t nanCount = 0;
+            size_t nanCount =
+                0;
 
-            size_t infCount = 0;
+            size_t infCount =
+                0;
 
             bool finiteFound =
                 false;
 
-            float minValue = 0.0f;
+            float minValue =
+                0.0f;
 
-            float maxValue = 0.0f;
+            float maxValue =
+                0.0f;
 
 
             for (
@@ -637,12 +854,19 @@ std::string runTransformerTest(
                 float value =
                     values[i];
 
-                if (std::isnan(value)) {
+
+                if (
+                    std::isnan(
+                        value
+                    )
+                ) {
 
                     ++nanCount;
 
                 } else if (
-                    std::isinf(value)
+                    std::isinf(
+                        value
+                    )
                 ) {
 
                     ++infCount;
@@ -719,28 +943,34 @@ std::string runTransformerTest(
         session
     );
 
-    destroyInterpreter(
+    MNN::Interpreter::destroy(
         interpreter
     );
+
+    /*
+     * Interpreter is now gone.
+     * Buffer can safely be released.
+     */
+    modelBuffer.clear();
 
 
     result
         << "\nSANA TRANSFORMER CPU TEST: PASS\n";
+
 
     return result.str();
 }
 
 
 /*
- * ------------------------------------------------------------
+ * ============================================================
  * VAE TEST
- * ------------------------------------------------------------
+ * ============================================================
  */
 
 std::string runVaeTest(
     int fd
 ) {
-
     std::ostringstream result;
 
     result
@@ -751,6 +981,7 @@ std::string runVaeTest(
         << fd
         << "\n";
 
+
     if (!validFd(fd)) {
 
         result
@@ -759,15 +990,18 @@ std::string runVaeTest(
         return result.str();
     }
 
-    long long size =
-        fdFileSize(fd);
+
+    long long fileSize =
+        getFileSize(fd);
+
 
     result
         << "File size: "
-        << size
+        << fileSize
         << " bytes\n\n";
 
-    if (size <= 0) {
+
+    if (fileSize <= 0) {
 
         result
             << "File size: FAIL\n";
@@ -775,52 +1009,79 @@ std::string runVaeTest(
         return result.str();
     }
 
-    std::string path =
-        fdPath(fd);
 
     result
-        << "Creating MNN interpreter...\n";
+        << "Loading model through MNN buffer API...\n";
+
+
+    std::vector<uint8_t> modelBuffer;
+
+    std::string loadError;
+
 
     MNN::Interpreter* interpreter =
-        MNN::Interpreter::createFromFile(
-            path.c_str()
+        loadModelFromFd(
+            fd,
+            modelBuffer,
+            loadError
         );
+
 
     if (!interpreter) {
 
         result
             << "Interpreter: FAIL\n";
 
+        result
+            << "Reason: "
+            << loadError
+            << "\n";
+
         return result.str();
     }
+
 
     result
         << "Interpreter: PASS\n";
 
     result
+        << "Model loaded with createFromBuffer()\n";
+
+
+    result
         << "Creating CPU session...\n";
+
 
     MNN::Session* session =
         createCpuSession(
-            interpreter,
-            4
+            interpreter
         );
+
 
     if (!session) {
 
         result
             << "CPU session: FAIL\n";
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
 
+
     result
         << "CPU session: PASS\n\n";
 
+
+    /*
+     * ========================================================
+     * VAE INPUT
+     * ========================================================
+     */
 
     MNN::Tensor* input =
         interpreter->getSessionInput(
@@ -834,13 +1095,16 @@ std::string runVaeTest(
         result
             << "Input tensor: FAIL\n";
 
+
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
@@ -872,13 +1136,16 @@ std::string runVaeTest(
         result
             << "Input shape: FAIL\n";
 
+
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
@@ -886,6 +1153,7 @@ std::string runVaeTest(
 
     result
         << "Input shape: PASS\n";
+
 
     result
         << "Input elements: "
@@ -908,17 +1176,24 @@ std::string runVaeTest(
         result
             << "Host tensor: FAIL\n";
 
+
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
 
+
+    /*
+     * Zero latent.
+     */
 
     std::fill(
         latent,
@@ -934,24 +1209,16 @@ std::string runVaeTest(
     result
         << "All latent values set to exactly 0.0\n";
 
-    result
-        << "Latent sample: "
-        << latent[0]
-        << ", "
-        << latent[
-            std::min<size_t>(
-                1,
-                hostInput.elementSize() - 1
-            )
-        ]
-        << ", "
-        << latent[
-            std::min<size_t>(
-                2,
-                hostInput.elementSize() - 1
-            )
-        ]
-        << "\n";
+
+    if (
+        hostInput.elementSize() > 0
+    ) {
+
+        result
+            << "Latent first value: "
+            << latent[0]
+            << "\n";
+    }
 
 
     input->copyFromHostTensor(
@@ -974,7 +1241,9 @@ std::string runVaeTest(
 
     result
         << "MNN error code: "
-        << static_cast<int>(code)
+        << static_cast<int>(
+            code
+        )
         << "\n";
 
 
@@ -983,13 +1252,16 @@ std::string runVaeTest(
         result
             << "VAE inference: FAIL\n";
 
+
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
@@ -998,6 +1270,12 @@ std::string runVaeTest(
     result
         << "VAE inference: PASS\n\n";
 
+
+    /*
+     * ========================================================
+     * OUTPUT
+     * ========================================================
+     */
 
     MNN::Tensor* output =
         interpreter->getSessionOutput(
@@ -1011,17 +1289,23 @@ std::string runVaeTest(
         result
             << "Output tensor: FAIL\n";
 
+
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
 
+
+    result
+        << "Output tensor: PASS\n";
 
     result
         << "Output shape: "
@@ -1051,28 +1335,35 @@ std::string runVaeTest(
         result
             << "Output host mapping: FAIL\n";
 
+
         interpreter->releaseSession(
             session
         );
 
-        destroyInterpreter(
+        MNN::Interpreter::destroy(
             interpreter
         );
+
+        modelBuffer.clear();
 
         return result.str();
     }
 
 
-    size_t nanCount = 0;
+    size_t nanCount =
+        0;
 
-    size_t infCount = 0;
+    size_t infCount =
+        0;
 
     bool finiteFound =
         false;
 
-    float minValue = 0.0f;
+    float minValue =
+        0.0f;
 
-    float maxValue = 0.0f;
+    float maxValue =
+        0.0f;
 
 
     for (
@@ -1085,12 +1376,18 @@ std::string runVaeTest(
             outputData[i];
 
 
-        if (std::isnan(value)) {
+        if (
+            std::isnan(
+                value
+            )
+        ) {
 
             ++nanCount;
 
         } else if (
-            std::isinf(value)
+            std::isinf(
+                value
+            )
         ) {
 
             ++infCount;
@@ -1170,9 +1467,11 @@ std::string runVaeTest(
         session
     );
 
-    destroyInterpreter(
+    MNN::Interpreter::destroy(
         interpreter
     );
+
+    modelBuffer.clear();
 
 
     if (finite) {
@@ -1192,9 +1491,9 @@ std::string runVaeTest(
 
 
 /*
- * ------------------------------------------------------------
- * INITIALIZE
- * ------------------------------------------------------------
+ * ============================================================
+ * ENGINE INITIALIZATION
+ * ============================================================
  */
 
 bool initializeEngine(
@@ -1203,7 +1502,6 @@ bool initializeEngine(
     bool preferOpenCl,
     int cpuThreads
 ) {
-
     (void)modelAsset;
     (void)cachePath;
     (void)preferOpenCl;
@@ -1223,9 +1521,9 @@ bool initializeEngine(
 
 
 /*
- * ------------------------------------------------------------
- * JNI INITIALIZE
- * ------------------------------------------------------------
+ * ============================================================
+ * nativeInitialize
+ * ============================================================
  */
 
 extern "C"
@@ -1239,7 +1537,6 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
     jboolean preferOpenCl,
     jint cpuThreads
 ) {
-
     (void)assetManager;
 
     std::string asset =
@@ -1268,9 +1565,9 @@ Java_com_sana_android_engine_NativeSana_nativeInitialize(
 
 
 /*
- * ------------------------------------------------------------
- * JNI IS INITIALIZED
- * ------------------------------------------------------------
+ * ============================================================
+ * nativeIsInitialized
+ * ============================================================
  */
 
 extern "C"
@@ -1279,7 +1576,6 @@ Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
     JNIEnv*,
     jobject
 ) {
-
     return gInitialized
         ? JNI_TRUE
         : JNI_FALSE;
@@ -1287,9 +1583,9 @@ Java_com_sana_android_engine_NativeSana_nativeIsInitialized(
 
 
 /*
- * ------------------------------------------------------------
- * JNI BACKEND
- * ------------------------------------------------------------
+ * ============================================================
+ * nativeGetBackend
+ * ============================================================
  */
 
 extern "C"
@@ -1298,7 +1594,6 @@ Java_com_sana_android_engine_NativeSana_nativeGetBackend(
     JNIEnv* env,
     jobject
 ) {
-
     return env->NewStringUTF(
         gBackend.c_str()
     );
@@ -1306,9 +1601,9 @@ Java_com_sana_android_engine_NativeSana_nativeGetBackend(
 
 
 /*
- * ------------------------------------------------------------
- * JNI STATUS
- * ------------------------------------------------------------
+ * ============================================================
+ * nativeGetStatus
+ * ============================================================
  */
 
 extern "C"
@@ -1317,7 +1612,6 @@ Java_com_sana_android_engine_NativeSana_nativeGetStatus(
     JNIEnv* env,
     jobject
 ) {
-
     return env->NewStringUTF(
         gStatus.c_str()
     );
@@ -1325,9 +1619,9 @@ Java_com_sana_android_engine_NativeSana_nativeGetStatus(
 
 
 /*
- * ------------------------------------------------------------
- * JNI RELEASE
- * ------------------------------------------------------------
+ * ============================================================
+ * nativeRelease
+ * ============================================================
  */
 
 extern "C"
@@ -1336,25 +1630,6 @@ Java_com_sana_android_engine_NativeSana_nativeRelease(
     JNIEnv*,
     jobject
 ) {
-
-    if (gInterpreter) {
-
-        if (gSession) {
-
-            gInterpreter->releaseSession(
-                gSession
-            );
-
-            gSession =
-                nullptr;
-        }
-
-        delete gInterpreter;
-
-        gInterpreter =
-            nullptr;
-    }
-
     gInitialized =
         false;
 
@@ -1364,9 +1639,9 @@ Java_com_sana_android_engine_NativeSana_nativeRelease(
 
 
 /*
- * ------------------------------------------------------------
- * TRANSFORMER FD
- * ------------------------------------------------------------
+ * ============================================================
+ * nativeTestTransformerFd
+ * ============================================================
  */
 
 extern "C"
@@ -1377,7 +1652,6 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformerFd(
     jint transformerFd,
     jboolean preferOpenCl
 ) {
-
     (void)preferOpenCl;
 
     int fd =
@@ -1385,7 +1659,9 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformerFd(
             transformerFd
         );
 
+
     std::string output;
+
 
     if (validFd(fd)) {
 
@@ -1397,7 +1673,7 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformerFd(
     } else {
 
         output =
-            "SANA TRANSFORMER TEST\n\n"
+            "SANA TRANSFORMER CPU TEST\n\n"
             "Invalid file descriptor.";
     }
 
@@ -1414,9 +1690,9 @@ Java_com_sana_android_engine_NativeSana_nativeTestTransformerFd(
 
 
 /*
- * ------------------------------------------------------------
- * VAE FD
- * ------------------------------------------------------------
+ * ============================================================
+ * nativeTestVaeFd
+ * ============================================================
  */
 
 extern "C"
@@ -1427,7 +1703,6 @@ Java_com_sana_android_engine_NativeSana_nativeTestVaeFd(
     jint vaeFd,
     jboolean preferOpenCl
 ) {
-
     (void)preferOpenCl;
 
     int fd =
@@ -1435,7 +1710,9 @@ Java_com_sana_android_engine_NativeSana_nativeTestVaeFd(
             vaeFd
         );
 
+
     std::string output;
+
 
     if (validFd(fd)) {
 
@@ -1447,150 +1724,9 @@ Java_com_sana_android_engine_NativeSana_nativeTestVaeFd(
     } else {
 
         output =
-            "SANA VAE TEST\n\n"
+            "SANA VAE CPU TEST\n\n"
             "Invalid file descriptor.";
     }
 
 
-    if (fd >= 0) {
-        close(fd);
-    }
-
-
-    return env->NewStringUTF(
-        output.c_str()
-    );
-}
-
-
-/*
- * ------------------------------------------------------------
- * COMBINED MODEL TEST
- * ------------------------------------------------------------
- */
-
-extern "C"
-JNIEXPORT jstring JNICALL
-Java_com_sana_android_engine_NativeSana_nativeTestModelsFd(
-    JNIEnv* env,
-    jobject,
-    jint transformerFd,
-    jint vaeFd,
-    jboolean preferOpenCl
-) {
-
-    (void)preferOpenCl;
-
-    int transformer =
-        static_cast<int>(
-            transformerFd
-        );
-
-    int vae =
-        static_cast<int>(
-            vaeFd
-        );
-
-
-    std::ostringstream output;
-
-
-    output
-        << "SANA 0.6B MODEL DIAGNOSTIC\n\n";
-
-    output
-        << "DIRECT EXTERNAL MODEL ACCESS\n";
-
-    output
-        << "No model copying performed.\n\n";
-
-
-    /*
-     * TRANSFORMER
-     */
-
-    output
-        << "========================================\n";
-
-    output
-        << "TRANSFORMER\n";
-
-    output
-        << "========================================\n\n";
-
-
-    if (validFd(transformer)) {
-
-        output
-            << runTransformerTest(
-                transformer
-            );
-
-    } else {
-
-        output
-            << "Transformer FD invalid.\n";
-    }
-
-
-    /*
-     * VAE
-     */
-
-    output
-        << "\n\n========================================\n";
-
-    output
-        << "VAE\n";
-
-    output
-        << "========================================\n\n";
-
-
-    if (validFd(vae)) {
-
-        output
-            << runVaeTest(
-                vae
-            );
-
-    } else {
-
-        output
-            << "VAE FD invalid.\n";
-    }
-
-
-    /*
-     * CLOSE DESCRIPTORS
-     */
-
-    if (transformer >= 0) {
-        close(transformer);
-    }
-
-    if (vae >= 0) {
-        close(vae);
-    }
-
-
-    output
-        << "\n\n========================================\n";
-
-    output
-        << "END OF DIAGNOSTIC\n";
-
-    output
-        << "========================================\n";
-
-
-    std::string text =
-        output.str();
-
-
-    return env->NewStringUTF(
-        text.c_str()
-    );
-}
-
-} // namespace
+    if
