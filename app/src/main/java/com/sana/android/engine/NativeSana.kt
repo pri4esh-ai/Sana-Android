@@ -2,7 +2,6 @@ package com.sana.android.engine
 
 import android.content.Context
 import android.content.res.AssetManager
-import java.io.File
 
 object NativeSana {
 
@@ -10,7 +9,12 @@ object NativeSana {
         System.loadLibrary("sana_native")
     }
 
-    // Existing engine API
+    /*
+     * ---------------------------------------------------------
+     * EXISTING ENGINE API
+     * ---------------------------------------------------------
+     */
+
     external fun nativeInitialize(
         assetManager: AssetManager,
         modelAsset: String,
@@ -20,31 +24,59 @@ object NativeSana {
     ): Boolean
 
     external fun nativeIsInitialized(): Boolean
+
     external fun nativeGetBackend(): String
+
     external fun nativeGetStatus(): String
+
     external fun nativeRelease()
 
-    // Transformer-only diagnostic
-    external fun nativeTestTransformer(
-        transformerPath: String,
-        cachePath: String,
+    /*
+     * ---------------------------------------------------------
+     * FD-BASED TRANSFORMER TEST
+     * ---------------------------------------------------------
+     *
+     * fd is owned by native code after the call starts.
+     */
+
+    external fun nativeTestTransformerFd(
+        transformerFd: Int,
         preferOpenCl: Boolean
     ): String
 
-    // VAE-only diagnostic
-    external fun nativeTestVae(
-        vaePath: String,
-        cachePath: String,
+    /*
+     * ---------------------------------------------------------
+     * FD-BASED VAE TEST
+     * ---------------------------------------------------------
+     */
+
+    external fun nativeTestVaeFd(
+        vaeFd: Int,
         preferOpenCl: Boolean
     ): String
 
-    // Legacy combined test (kept for compatibility)
-    external fun nativeTestModels(
-        transformerPath: String,
-        vaePath: String,
-        cachePath: String,
+    /*
+     * ---------------------------------------------------------
+     * FD-BASED COMBINED TEST
+     * ---------------------------------------------------------
+     *
+     * NO MODEL COPY.
+     *
+     * Android opens the files.
+     * Native receives their Linux file descriptors.
+     */
+
+    external fun nativeTestModelsFd(
+        transformerFd: Int,
+        vaeFd: Int,
         preferOpenCl: Boolean
     ): String
+
+    /*
+     * ---------------------------------------------------------
+     * KOTLIN HELPERS
+     * ---------------------------------------------------------
+     */
 
     fun initialize(
         context: Context,
@@ -52,6 +84,7 @@ object NativeSana {
         preferOpenCl: Boolean = true,
         cpuThreads: Int = 4
     ): Boolean {
+
         return nativeInitialize(
             context.assets,
             modelAsset,
@@ -61,49 +94,72 @@ object NativeSana {
         )
     }
 
-    fun isInitialized(): Boolean = nativeIsInitialized()
+    fun isInitialized(): Boolean {
+        return nativeIsInitialized()
+    }
 
-    fun backend(): String = nativeGetBackend()
+    fun backend(): String {
+        return nativeGetBackend()
+    }
 
-    fun status(): String = nativeGetStatus()
+    fun status(): String {
+        return nativeGetStatus()
+    }
 
-    fun release() = nativeRelease()
+    fun release() {
+        nativeRelease()
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * TRANSFORMER
+     * ---------------------------------------------------------
+     */
 
     fun testTransformer(
-        context: Context,
-        transformerFile: File,
-        preferOpenCl: Boolean = true
+        transformerFd: Int,
+        preferOpenCl: Boolean = false
     ): String {
-        return nativeTestTransformer(
-            transformerPath = transformerFile.absolutePath,
-            cachePath = context.cacheDir.absolutePath,
-            preferOpenCl = preferOpenCl
+
+        return nativeTestTransformerFd(
+            transformerFd,
+            preferOpenCl
         )
     }
+
+    /*
+     * ---------------------------------------------------------
+     * VAE
+     * ---------------------------------------------------------
+     */
 
     fun testVae(
-        context: Context,
-        vaeFile: File,
-        preferOpenCl: Boolean = true
+        vaeFd: Int,
+        preferOpenCl: Boolean = false
     ): String {
-        return nativeTestVae(
-            vaePath = vaeFile.absolutePath,
-            cachePath = context.cacheDir.absolutePath,
-            preferOpenCl = preferOpenCl
+
+        return nativeTestVaeFd(
+            vaeFd,
+            preferOpenCl
         )
     }
 
+    /*
+     * ---------------------------------------------------------
+     * TRANSFORMER + VAE
+     * ---------------------------------------------------------
+     */
+
     fun testModels(
-        context: Context,
-        transformerFile: File,
-        vaeFile: File,
-        preferOpenCl: Boolean = true
+        transformerFd: Int,
+        vaeFd: Int,
+        preferOpenCl: Boolean = false
     ): String {
-        return nativeTestModels(
-            transformerPath = transformerFile.absolutePath,
-            vaePath = vaeFile.absolutePath,
-            cachePath = context.cacheDir.absolutePath,
-            preferOpenCl = preferOpenCl
+
+        return nativeTestModelsFd(
+            transformerFd,
+            vaeFd,
+            preferOpenCl
         )
     }
 }
