@@ -9,12 +9,6 @@ object NativeSana {
         System.loadLibrary("sana_native")
     }
 
-    /*
-     * ---------------------------------------------------------
-     * EXISTING ENGINE API
-     * ---------------------------------------------------------
-     */
-
     external fun nativeInitialize(
         assetManager: AssetManager,
         modelAsset: String,
@@ -31,52 +25,21 @@ object NativeSana {
 
     external fun nativeRelease()
 
-    /*
-     * ---------------------------------------------------------
-     * FD-BASED TRANSFORMER TEST
-     * ---------------------------------------------------------
-     *
-     * fd is owned by native code after the call starts.
-     */
-
     external fun nativeTestTransformerFd(
         transformerFd: Int,
         preferOpenCl: Boolean
     ): String
-
-    /*
-     * ---------------------------------------------------------
-     * FD-BASED VAE TEST
-     * ---------------------------------------------------------
-     */
 
     external fun nativeTestVaeFd(
         vaeFd: Int,
         preferOpenCl: Boolean
     ): String
 
-    /*
-     * ---------------------------------------------------------
-     * FD-BASED COMBINED TEST
-     * ---------------------------------------------------------
-     *
-     * NO MODEL COPY.
-     *
-     * Android opens the files.
-     * Native receives their Linux file descriptors.
-     */
-
     external fun nativeTestModelsFd(
         transformerFd: Int,
         vaeFd: Int,
         preferOpenCl: Boolean
     ): String
-
-    /*
-     * ---------------------------------------------------------
-     * KOTLIN HELPERS
-     * ---------------------------------------------------------
-     */
 
     fun initialize(
         context: Context,
@@ -110,12 +73,6 @@ object NativeSana {
         nativeRelease()
     }
 
-    /*
-     * ---------------------------------------------------------
-     * TRANSFORMER
-     * ---------------------------------------------------------
-     */
-
     fun testTransformer(
         transformerFd: Int,
         preferOpenCl: Boolean = false
@@ -127,12 +84,6 @@ object NativeSana {
         )
     }
 
-    /*
-     * ---------------------------------------------------------
-     * VAE
-     * ---------------------------------------------------------
-     */
-
     fun testVae(
         vaeFd: Int,
         preferOpenCl: Boolean = false
@@ -143,12 +94,6 @@ object NativeSana {
             preferOpenCl
         )
     }
-
-    /*
-     * ---------------------------------------------------------
-     * TRANSFORMER + VAE
-     * ---------------------------------------------------------
-     */
 
     fun testModels(
         transformerFd: Int,
